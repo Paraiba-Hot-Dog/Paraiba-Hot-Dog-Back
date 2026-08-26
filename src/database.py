@@ -11,6 +11,12 @@ def _build_database_url() -> str:
     """Constroi a URL de conexao com o banco de dados a partir das variaveis de ambiente."""
     database_url = getenv("DATABASE_URL")
     if database_url:
+        # Supabase/Heroku usam 'postgres://' mas SQLAlchemy precisa de 'postgresql://'
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        # Garante que o driver psycopg2 seja usado
+        if database_url.startswith("postgresql://") and "+" not in database_url.split("://")[0]:
+            database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
         return database_url
 
     user = getenv("POSTGRES_USER", "postgres")

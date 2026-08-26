@@ -1,3 +1,5 @@
+import os
+import re
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -55,9 +57,19 @@ async def request_validation_exception_handler(_request, exc):
         },
     )
 
+# CORS: localhost (dev) + FRONTEND_BASE_URL (produção)
+_frontend_url = os.getenv("FRONTEND_BASE_URL", "")
+_localhost_pattern = r"http://(localhost|127\.0\.0\.1):\d+"
+
+if _frontend_url:
+    _escaped = re.escape(_frontend_url.rstrip("/"))
+    _cors_regex = rf"({_localhost_pattern}|{_escaped})"
+else:
+    _cors_regex = _localhost_pattern
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
