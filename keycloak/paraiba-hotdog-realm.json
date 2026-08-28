@@ -57,6 +57,24 @@
           "temporary": false
         }
       ]
+    },
+    {
+      "username": "admin",
+      "email": "admin@paraibahd.com",
+      "firstName": "Administrador",
+      "lastName": "Paraiba HD",
+      "emailVerified": true,
+      "enabled": true,
+      "realmRoles": [
+        "administrador"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Admin@paraiba123",
+          "temporary": false
+        }
+      ]
     }
   ]
 }
