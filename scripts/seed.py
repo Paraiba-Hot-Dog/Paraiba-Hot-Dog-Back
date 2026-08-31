@@ -145,15 +145,21 @@ def criar_clientes(db: Session) -> list[Cliente]:
     return clientes
 
 
+import os
+
 def criar_usuario(db: Session, unidade: Unidade, permissoes: list[Permissao]) -> Usuario:
-    """Cadastra um usuario administrador local para testes manuais."""
+    """Cadastra um usuario administrador local para testes manuais.
+    Para conseguir logar, coloque o SUPABASE_DEV_ADMIN_UID no seu .env.
+    """
+    admin_uid = os.getenv("SUPABASE_DEV_ADMIN_UID")
+
     usuario = Usuario(
         nome="Administrador Paraiba Hot Dog",
         email="admin.paraiba@example.com",
         senha=None,
         funcao=FuncaoUsuario.administrador,
         unidade_id=unidade.id,
-        auth_provider_id=None,
+        auth_provider_id=admin_uid,
     )
     usuario.permissoes = permissoes
     db.add(usuario)
