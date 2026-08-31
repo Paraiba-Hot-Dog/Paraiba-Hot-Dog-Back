@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.post("/", response_model=UsuarioRead, status_code=status.HTTP_201_CREATED)
 def create_usuario(usuario_create: UsuarioCreate, db: Session = Depends(get_db)) -> UsuarioRead:
-    """Cria um novo usuario e o sincroniza com o Keycloak."""
+    """Cria um novo usuario e o sincroniza com o Supabase Auth."""
     return UsuarioRead.model_validate(repository.create_usuario(db, usuario_create))
 
 
@@ -38,6 +38,6 @@ def update_usuario(usuario_id: int, data: UsuarioUpdate, db: Session = Depends(g
 
 @router.delete("/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_usuario(usuario_id: int, db: Session = Depends(get_db)) -> Response:
-    """Remove um usuario pelo ID e o exclui do Keycloak."""
+    """Remove um usuario pelo ID e o exclui do Supabase Auth."""
     repository.delete_usuario(db, usuario_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

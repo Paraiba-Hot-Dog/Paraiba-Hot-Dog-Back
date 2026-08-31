@@ -153,7 +153,7 @@ def criar_usuario(db: Session, unidade: Unidade, permissoes: list[Permissao]) ->
         senha=None,
         funcao=FuncaoUsuario.administrador,
         unidade_id=unidade.id,
-        keycloak_id=None,
+        auth_provider_id=None,
     )
     usuario.permissoes = permissoes
     db.add(usuario)

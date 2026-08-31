@@ -23,17 +23,9 @@ class Settings(BaseSettings):
     smtp_recuperacao_senha_from_name: str = "Paraiba Hot Dog"
     smtp_recuperacao_senha_starttls: bool = True
     smtp_recuperacao_senha_ssl: bool = False
-    keycloak_realm: str = "paraiba-hotdog"
-    keycloak_issuer: str = "http://localhost:8080/realms/paraiba-hotdog"
-    keycloak_jwks_url: str = (
-        "http://keycloak:8080/realms/paraiba-hotdog/protocol/openid-connect/certs"
-    )
-    keycloak_client_id: str | None = None
-    keycloak_jwks_cache_seconds: int = 3600
-    keycloak_admin_base_url: str = "http://localhost:8080"
-    keycloak_admin_username: str = "admin"
-    keycloak_admin_password: str = "admin"
-    keycloak_user_sync_enabled: bool = True
+    supabase_url: str = ""
+    supabase_jwt_secret: str = ""
+    supabase_service_role_key: str = ""
     frontend_base_url: str = "http://localhost:5173"
     reset_senha_token_minutos: int = 30
 

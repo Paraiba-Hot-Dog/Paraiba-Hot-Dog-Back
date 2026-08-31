@@ -44,7 +44,7 @@ def _usuario(db_session, email: str = "maria@example.com") -> Usuario:
     usuario = Usuario(
         nome="Maria",
         email=email,
-        keycloak_id="keycloak-1",
+        auth_provider_id="auth-1",
         funcao=FuncaoUsuario.caixa,
     )
     db_session.add(usuario)
@@ -85,7 +85,7 @@ def test_esqueci_senha_com_email_inexistente_nao_envia_email(db_session, monkeyp
     assert db_session.query(RecuperacaoSenhaToken).count() == 0
 
 
-def test_redefinir_senha_atualiza_keycloak_e_invalida_token(db_session, monkeypatch):
+def test_redefinir_senha_atualiza_supabase_e_invalida_token(db_session, monkeypatch):
     chamadas = []
     usuario = _usuario(db_session)
     token = "token-valido"
@@ -99,15 +99,15 @@ def test_redefinir_senha_atualiza_keycloak_e_invalida_token(db_session, monkeypa
     )
     db_session.commit()
     monkeypatch.setattr(
-        "src.auth.repository.update_keycloak_user",
-        lambda keycloak_id, **data: chamadas.append((keycloak_id, data)),
+        "src.auth.repository.supabase_update_user",
+        lambda user_id, **data: chamadas.append((user_id, data)),
     )
 
     redefinir_senha(db_session, token, "nova-senha")
 
     token_db = db_session.query(RecuperacaoSenhaToken).first()
     assert token_db.used_at is not None
-    assert chamadas == [("keycloak-1", {"senha": "nova-senha"})]
+    assert chamadas == [("auth-1", {"password": "nova-senha"})]
 
 
 def test_redefinir_senha_rejeita_token_invalido(db_session):

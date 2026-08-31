@@ -7,9 +7,9 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.auth.model import RecuperacaoSenhaToken
+from src.auth.supabase_auth import update_user as supabase_update_user
 from src.config import settings
 from src.email_service import enviar_recuperacao_senha
-from src.keycloak_admin import update_keycloak_user
 from src.usuarios.model import Usuario
 
 MENSAGEM_RECUPERACAO = (
@@ -94,7 +94,8 @@ def redefinir_senha(db: Session, token: str, nova_senha: str) -> None:
             detail="Token de recuperacao invalido ou expirado",
         )
 
-    update_keycloak_user(usuario.keycloak_id, senha=nova_senha)
+    # Atualiza senha no Supabase Auth
+    supabase_update_user(usuario.auth_provider_id, password=nova_senha)
     usuario.senha = None
     token_db.used_at = agora
     db.commit()

@@ -1,6 +1,6 @@
 import json
 from time import monotonic
-from typing import Any, Callable
+from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -14,6 +14,9 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 _jwks_cache: dict[str, Any] = {"keys": None, "expires_at": 0.0}
 
+# Cache JWKS por 1 hora
+_JWKS_CACHE_SECONDS = 3600
+
 
 def _auth_exception(detail: str = "Credenciais invalidas") -> HTTPException:
     """Cria uma resposta 401 padronizada para falhas de autenticacao Bearer."""
@@ -23,27 +26,30 @@ def _auth_exception(detail: str = "Credenciais invalidas") -> HTTPException:
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+
 def _fetch_jwks() -> dict[str, Any]:
-    """Busca e guarda em cache as chaves publicas JWKS publicadas pelo Keycloak."""
+    """Busca e guarda em cache as chaves publicas JWKS do Supabase Auth."""
     now = monotonic()
     cached_keys = _jwks_cache["keys"]
     if cached_keys and now < _jwks_cache["expires_at"]:
         return cached_keys
 
+    jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
     try:
-        with urlopen(settings.keycloak_jwks_url, timeout=5) as response:
-            jwks = response.read().decode("utf-8")
+        with urlopen(jwks_url, timeout=5) as response:
+            jwks_raw = response.read().decode("utf-8")
     except (TimeoutError, URLError) as exc:
         raise _auth_exception(
-            "Nao foi possivel consultar as chaves do Keycloak"
+            "Nao foi possivel consultar as chaves do Supabase Auth"
         ) from exc
 
     try:
-        keys = json.loads(jwks)
+        keys = json.loads(jwks_raw)
     except json.JSONDecodeError as exc:
-        raise _auth_exception("Resposta invalida das chaves do Keycloak") from exc
+        raise _auth_exception("Resposta invalida das chaves do Supabase Auth") from exc
+
     _jwks_cache["keys"] = keys
-    _jwks_cache["expires_at"] = now + settings.keycloak_jwks_cache_seconds
+    _jwks_cache["expires_at"] = now + _JWKS_CACHE_SECONDS
     return keys
 
 
@@ -65,43 +71,19 @@ def _get_signing_key(token: str) -> dict[str, Any]:
     raise _auth_exception("Chave de assinatura do token nao encontrada")
 
 
-def _extract_roles(payload: dict[str, Any]) -> list[str]:
-    """Extrai roles de realm e clients do payload JWT validado."""
-    roles: set[str] = set()
-    roles.update(payload.get("realm_access", {}).get("roles", []))
-
-    # pega roles de todos os clientes, pois o token pode conter permissoes
-    # de mais de um cliente dependendo da configuracao do Keycloak
-    resource_access = payload.get("resource_access", {})
-    for client_data in resource_access.values():
-        roles.update(client_data.get("roles", []))
-
-    return sorted(roles)
-
-
-def decode_keycloak_token(token: str) -> dict[str, Any]:
-    """Valida o JWT do Keycloak e retorna o payload com as roles normalizadas."""
+def decode_supabase_token(token: str) -> dict[str, Any]:
+    """Valida o JWT do Supabase Auth e retorna o payload."""
     key = _get_signing_key(token)
     try:
         payload = jwt.decode(
             token,
             key,
-            algorithms=[key.get("alg", "RS256")],
-            issuer=settings.keycloak_issuer,
+            algorithms=[key.get("alg", "ES256")],
             options={"verify_aud": False},
         )
     except JWTError as exc:
         raise _auth_exception("Token invalido ou expirado") from exc
 
-    if settings.keycloak_client_id:
-        authorized_party = payload.get("azp")
-        audience = payload.get("aud", [])
-        if isinstance(audience, str):
-            audience = [audience]
-        if settings.keycloak_client_id not in [authorized_party, *audience]:
-            raise _auth_exception("Token emitido para outro cliente")
-
-    payload["roles"] = _extract_roles(payload)
     return payload
 
 
@@ -115,19 +97,35 @@ def get_current_user(
     if credentials.scheme.lower() != "bearer":
         raise _auth_exception("Esquema de autenticacao invalido")
 
-    return decode_keycloak_token(credentials.credentials)
+    return decode_supabase_token(credentials.credentials)
 
 
-def require_roles(*required_roles: str) -> Callable[..., dict[str, Any]]:
+def require_roles(*required_roles: str):
     """Cria uma dependencia FastAPI que exige pelo menos uma das roles informadas."""
+    from src.database import SessionLocal
+    from src.usuarios.model import Usuario
+
     def dependency(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
         """Valida se o usuario autenticado possui alguma role exigida."""
-        user_roles = set(user.get("roles", []))
-        if not user_roles.intersection(required_roles):
+        sub = user.get("sub")
+        if not sub:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Usuario sem permissao para acessar este recurso",
             )
+
+        db = SessionLocal()
+        try:
+            usuario = db.query(Usuario).filter(Usuario.auth_provider_id == sub).first()
+            if not usuario or usuario.funcao.value not in required_roles:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Usuario sem permissao para acessar este recurso",
+                )
+        finally:
+            db.close()
+
+        user["roles"] = [usuario.funcao.value]
         return user
 
     return dependency

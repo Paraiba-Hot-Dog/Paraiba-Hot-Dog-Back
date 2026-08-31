@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from src.permissoes.model import Permissao
 from src.unidades.model import Unidade
-from src.keycloak_admin import create_keycloak_user, delete_keycloak_user, update_keycloak_user
+from src.auth.supabase_auth import signup as supabase_signup, update_user as supabase_update_user, delete_user as supabase_delete_user
 from src.usuarios.model import Usuario
 from src.usuarios.schema import UsuarioCreate, UsuarioUpdate
 
@@ -36,18 +36,21 @@ def _tratar_integridade(e: IntegrityError) -> HTTPException:
 
 
 def create_usuario(db: Session, data: UsuarioCreate) -> Usuario:
-    """Cria um novo usuario no banco e o sincroniza com o Keycloak."""
+    """Cria um novo usuario no banco e no Supabase Auth."""
     permissoes = _resolver_permissoes(db, data.permissao_ids)
     _validar_unidade(db, data.unidade_id)
-    keycloak_id, keycloak_user_created = create_keycloak_user(
-        nome=data.nome,
+
+    # Cria usuario no Supabase Auth
+    auth_user = supabase_signup(
         email=str(data.email),
-        senha=data.senha,
-        nome_role=data.funcao.value,
+        password=data.senha,
+        user_metadata={"nome": data.nome, "funcao": data.funcao.value},
     )
+    auth_user_id = auth_user.get("id")
+
     db_usuario = Usuario(
         **data.model_dump(exclude={"permissao_ids", "senha"}),
-        keycloak_id=keycloak_id,
+        auth_provider_id=auth_user_id,
     )
     db_usuario.permissoes = permissoes
     db.add(db_usuario)
@@ -55,8 +58,8 @@ def create_usuario(db: Session, data: UsuarioCreate) -> Usuario:
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        if keycloak_user_created:
-            delete_keycloak_user(keycloak_id)
+        if auth_user_id:
+            supabase_delete_user(auth_user_id)
         raise _tratar_integridade(e) from e
     db.refresh(db_usuario)
     return db_usuario
@@ -81,19 +84,18 @@ def get_usuario(db: Session, usuario_id: int) -> Usuario:
 
 
 def update_usuario(db: Session, usuario_id: int, data: UsuarioUpdate) -> Usuario:
-    """Atualiza os campos fornecidos de um usuario e propaga as alteracoes ao Keycloak."""
+    """Atualiza os campos fornecidos de um usuario e propaga as alteracoes ao Supabase Auth."""
     usuario = get_usuario(db, usuario_id)
     update_data = data.model_dump(exclude_unset=True)
     if "unidade_id" in update_data:
         _validar_unidade(db, update_data["unidade_id"])
     if "permissao_ids" in update_data:
         usuario.permissoes = _resolver_permissoes(db, update_data.pop("permissao_ids"))
-    keycloak_update = {
-        "nome": update_data.get("nome"),
-        "email": str(update_data["email"]) if "email" in update_data else None,
-        "senha": update_data.pop("senha", None),
-        "nome_role": update_data["funcao"].value if "funcao" in update_data else None,
-    }
+
+    # Prepara atualizacao no Supabase Auth
+    supabase_email = str(update_data["email"]) if "email" in update_data else None
+    supabase_senha = update_data.pop("senha", None)
+
     for field, value in update_data.items():
         setattr(usuario, field, value)
     try:
@@ -102,14 +104,16 @@ def update_usuario(db: Session, usuario_id: int, data: UsuarioUpdate) -> Usuario
         db.rollback()
         raise _tratar_integridade(e) from e
     db.refresh(usuario)
-    update_keycloak_user(usuario.keycloak_id, **keycloak_update)
+
+    # Sincroniza com Supabase Auth
+    supabase_update_user(usuario.auth_provider_id, email=supabase_email, password=supabase_senha)
     return usuario
 
 
 def delete_usuario(db: Session, usuario_id: int) -> None:
-    """Remove um usuario do banco de dados e o exclui do Keycloak."""
+    """Remove um usuario do banco de dados e do Supabase Auth."""
     usuario = get_usuario(db, usuario_id)
-    keycloak_id = usuario.keycloak_id
+    auth_user_id = usuario.auth_provider_id
     db.delete(usuario)
     db.commit()
-    delete_keycloak_user(keycloak_id)
+    supabase_delete_user(auth_user_id)
