@@ -152,10 +152,11 @@ def criar_usuario(db: Session, unidade: Unidade, permissoes: list[Permissao]) ->
     Para conseguir logar, coloque o SUPABASE_DEV_ADMIN_UID no seu .env.
     """
     admin_uid = os.getenv("SUPABASE_DEV_ADMIN_UID")
+    admin_email = os.getenv("SUPABASE_DEV_ADMIN_EMAIL")
 
     usuario = Usuario(
         nome="Administrador Paraiba Hot Dog",
-        email="admin.paraiba@example.com",
+        email=admin_email,
         senha=None,
         funcao=FuncaoUsuario.administrador,
         unidade_id=unidade.id,
