@@ -155,11 +155,11 @@ def criar_usuario(db: Session, unidade: Unidade, permissoes: list[Permissao]) ->
     admin_email = os.getenv("SUPABASE_DEV_ADMIN_EMAIL")
 
     usuario = Usuario(
-        nome="Administrador Paraiba Hot Dog",
+        nome="Tigrinho",
         email=admin_email,
         senha=None,
         funcao=FuncaoUsuario.administrador,
-        unidade_id=unidade.id,
+        unidade_id=None,
         auth_provider_id=admin_uid,
     )
     usuario.permissoes = permissoes

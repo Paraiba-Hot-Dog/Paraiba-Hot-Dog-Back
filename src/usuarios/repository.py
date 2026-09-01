@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 
 from src.permissoes.model import Permissao
 from src.unidades.model import Unidade
-from src.auth.supabase_auth import signup as supabase_signup, update_user as supabase_update_user, delete_user as supabase_delete_user
+from src.auth.supabase_auth import (
+    delete_user as supabase_delete_user,
+    signup as supabase_signup,
+    update_user as supabase_update_user,
+)
 from src.usuarios.model import Usuario
 from src.usuarios.schema import UsuarioCreate, UsuarioUpdate
 

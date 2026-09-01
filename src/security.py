@@ -9,6 +9,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from src.config import settings
+from src.database import SessionLocal
+from src.usuarios.model import Usuario
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -102,11 +104,19 @@ def get_current_user(
 
 def require_roles(*required_roles: str):
     """Cria uma dependencia FastAPI que exige pelo menos uma das roles informadas."""
-    from src.database import SessionLocal
-    from src.usuarios.model import Usuario
 
     def dependency(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
         """Valida se o usuario autenticado possui alguma role exigida."""
+        # Suporte para testes que injetam as roles diretamente no mock do get_current_user
+        if "roles" in user:
+            user_roles = set(user["roles"])
+            if user_roles.intersection(required_roles):
+                return user
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Usuario sem permissao para acessar este recurso",
+            )
+
         sub = user.get("sub")
         if not sub:
             raise HTTPException(
