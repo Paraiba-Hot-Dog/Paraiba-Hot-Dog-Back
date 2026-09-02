@@ -21,6 +21,7 @@ from src.permissoes.router import router as permissoes_router
 from src.blog.router import router as blog_router
 from src.sobre_nos.router import router as sobre_nos_router
 from src.pedidos.router import router as pedidos_router
+from src.institucional.router import router as institucional_router
 from src.security import get_current_user
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -131,6 +132,11 @@ app.include_router(
     prefix="/pedidos",
     tags=["pedidos"],
     dependencies=auth_dependencies,
+)
+app.include_router(
+    institucional_router,
+    prefix="/institucional",
+    tags=["institucional"],
 )
 app.include_router(
     bi_router,

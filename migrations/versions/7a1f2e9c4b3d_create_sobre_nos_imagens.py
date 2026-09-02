@@ -1,7 +1,7 @@
 """create sobre_nos_imagens table
 
 Revision ID: 7a1f2e9c4b3d
-Revises: a1b2c3d4e5f6
+Revises: 0a1b2c3d4e5f
 Create Date: 2026-09-02
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "7a1f2e9c4b3d"
-down_revision = "a1b2c3d4e5f6"
+down_revision = "0a1b2c3d4e5f"
 branch_labels = None
 depends_on = None
 
