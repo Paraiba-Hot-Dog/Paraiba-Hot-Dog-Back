@@ -19,6 +19,7 @@ from src.produtos.router import router as produtos_router
 from src.unidades.router import router as unidades_router
 from src.permissoes.router import router as permissoes_router
 from src.blog.router import router as blog_router
+from src.sobre_nos.router import router as sobre_nos_router
 from src.pedidos.router import router as pedidos_router
 from src.security import get_current_user
 
@@ -119,6 +120,11 @@ app.include_router(
     blog_router,
     prefix="/blog",
     tags=["blog"],
+)
+app.include_router(
+    sobre_nos_router,
+    prefix="/sobre-nos",
+    tags=["sobre-nos"],
 )
 app.include_router(
     pedidos_router,
