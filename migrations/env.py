@@ -22,6 +22,7 @@ import src.produtos.model  # noqa: F401,E402
 import src.blog.model  # noqa: F401,E402
 import src.pedidos.model  # noqa: F401,E402
 import src.institucional.model  # noqa: F401,E402
+import src.avaliacoes.model  # noqa: F401,E402
 
 
 config = context.config
