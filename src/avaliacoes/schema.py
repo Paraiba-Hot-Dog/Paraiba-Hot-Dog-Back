@@ -4,8 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class AvaliacaoBase(BaseModel):
-    cliente_id: int = Field(..., gt=0)
-    unidade_id: int = Field(..., gt=0)
     descricao: str = Field(..., min_length=1)
     estrelas: int = Field(..., ge=1, le=5)
 
@@ -21,13 +19,9 @@ class AvaliacaoUpdate(BaseModel):
     estrelas: Optional[int] = Field(None, ge=1, le=5)
 
 
-class AvaliacaoRead(BaseModel):
+class AvaliacaoRead(AvaliacaoBase):
     id: int
     cliente_id: int
     unidade_id: int
-    nome_cliente: str
-    nome_unidade: str
-    descricao: str
-    estrelas: int
 
     model_config = ConfigDict(from_attributes=True)

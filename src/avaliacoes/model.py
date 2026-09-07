@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
@@ -14,13 +14,18 @@ if TYPE_CHECKING:
 
 class Avaliacao(Base):
     __tablename__ = "avaliacoes"
+    __table_args__ = (
+        CheckConstraint(
+            "estrelas BETWEEN 1 AND 5", name="ck_avaliacoes_estrelas_1_5"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cliente_id: Mapped[int] = mapped_column(
-        ForeignKey("clientes.id"), nullable=False
+        ForeignKey("clientes.id"), nullable=False, index=True
     )
     unidade_id: Mapped[int] = mapped_column(
-        ForeignKey("unidades.id"), nullable=False
+        ForeignKey("unidades.id", ondelete="CASCADE"), nullable=False, index=True
     )
     descricao: Mapped[str] = mapped_column(Text, nullable=False)
     estrelas: Mapped[int] = mapped_column(Integer, nullable=False)
