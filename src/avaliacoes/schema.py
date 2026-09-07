@@ -1,9 +1,8 @@
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class AvaliacaoBase(BaseModel):
+    nome_cliente: str = Field(..., min_length=1, max_length=120)
     descricao: str = Field(..., min_length=1)
     estrelas: int = Field(..., ge=1, le=5)
 
@@ -13,15 +12,11 @@ class AvaliacaoCreate(AvaliacaoBase):
 
 
 class AvaliacaoUpdate(BaseModel):
-    cliente_id: Optional[int] = Field(None, gt=0)
-    unidade_id: Optional[int] = Field(None, gt=0)
-    descricao: Optional[str] = Field(None, min_length=1)
-    estrelas: Optional[int] = Field(None, ge=1, le=5)
+    ativo: bool
 
 
 class AvaliacaoRead(AvaliacaoBase):
     id: int
-    cliente_id: int
-    unidade_id: int
+    ativo: bool
 
     model_config = ConfigDict(from_attributes=True)
