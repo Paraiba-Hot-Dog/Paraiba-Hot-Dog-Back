@@ -19,20 +19,12 @@ def upgrade() -> None:
     op.create_table(
         "avaliacoes",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "cliente_id",
-            sa.Integer(),
-            sa.ForeignKey("clientes.id"),
-            nullable=False,
-        ),
-        sa.Column(
-            "unidade_id",
-            sa.Integer(),
-            sa.ForeignKey("unidades.id"),
-            nullable=False,
-        ),
+        sa.Column("nome_cliente", sa.String(length=120), nullable=False),
         sa.Column("descricao", sa.Text(), nullable=False),
         sa.Column("estrelas", sa.Integer(), nullable=False),
+        sa.Column(
+            "ativo", sa.Boolean(), nullable=False, server_default=sa.true()
+        ),
         sa.CheckConstraint(
             "estrelas BETWEEN 1 AND 5", name="ck_avaliacoes_estrelas_1_5"
         ),
