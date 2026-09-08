@@ -1,3 +1,6 @@
+import re
+
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,8 +18,26 @@ def _mapear_erro_integridade(error: IntegrityError) -> str:
     return "Violacao de integridade"
 
 
+def _escapar_like(termo: str) -> str:
+    """Neutraliza os curingas do LIKE para que sejam buscados como texto literal."""
+    return termo.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _condicao_busca(termo: str):
+    """Monta a condicao OR que procura o termo em nome, email ou telefone."""
+    padrao = f"%{_escapar_like(termo)}%"
+    condicoes = [
+        Cliente.nome.ilike(padrao, escape="\\"),
+        Cliente.email.ilike(padrao, escape="\\"),
+    ]
+    digitos = re.sub(r"\D", "", termo)
+    if digitos:
+        condicoes.append(Cliente.telefone.like(f"%{digitos}%"))
+    return or_(*condicoes)
+
+
 def listar_clientes(db: Session, filtro: ClienteFiltro) -> list[Cliente]:
-    """Lista os clientes ativos aplicando os filtros de telefone, nome e email fornecidos."""
+    """Lista os clientes ativos aplicando os filtros informados, em ordem alfabetica."""
     query = db.query(Cliente).filter(Cliente.ativo.is_(True))
     if filtro.telefone:
         query = query.filter(Cliente.telefone == filtro.telefone)
@@ -24,7 +45,15 @@ def listar_clientes(db: Session, filtro: ClienteFiltro) -> list[Cliente]:
         query = query.filter(Cliente.nome.ilike(f"%{filtro.nome}%"))
     if filtro.email:
         query = query.filter(Cliente.email == filtro.email)
-    return query.order_by(Cliente.id.asc()).offset(filtro.skip).limit(filtro.limit).all()
+    termo = (filtro.busca or "").strip()
+    if termo:
+        query = query.filter(_condicao_busca(termo))
+    return (
+        query.order_by(func.lower(Cliente.nome).asc(), Cliente.id.asc())
+        .offset(filtro.skip)
+        .limit(filtro.limit)
+        .all()
+    )
 
 
 def obter_cliente(db: Session, cliente_id: int) -> Cliente | None:
