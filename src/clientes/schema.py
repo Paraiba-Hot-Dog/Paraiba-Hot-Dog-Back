@@ -44,5 +44,6 @@ class ClienteFiltro(ClienteTelefoneMixin):
     telefone: Optional[str] = None
     nome: Optional[str] = None
     email: Optional[EmailStr] = None
+    busca: Optional[str] = Field(None, max_length=120)
     skip: int = Field(default=0, ge=0)
     limit: int = Field(default=100, gt=0)
