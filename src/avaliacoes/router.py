@@ -41,7 +41,7 @@ def atualizar_avaliacao(
     data: AvaliacaoUpdate,
     db: Session = Depends(get_db),
 ):
-    """Exibe ou oculta uma avaliacao no site. Requer autenticacao."""
+    """Atualiza parcialmente uma avaliacao (nome, descricao, estrelas ou visibilidade). Requer autenticacao."""
     return repository.atualizar_avaliacao(db, avaliacao_id, data)
 
 
