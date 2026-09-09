@@ -75,6 +75,9 @@ def _get_signing_key(token: str) -> dict[str, Any]:
 
 def decode_supabase_token(token: str) -> dict[str, Any]:
     """Valida o JWT do Supabase Auth e retorna o payload."""
+    if settings.local_auth_enabled:
+        from src.auth.local_auth import decode_token
+        return decode_token(token)
     key = _get_signing_key(token)
     try:
         payload = jwt.decode(

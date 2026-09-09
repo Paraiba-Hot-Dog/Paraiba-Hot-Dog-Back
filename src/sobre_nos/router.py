@@ -13,21 +13,39 @@ router = APIRouter()
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "sobre_nos"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-
+TIPOS_IMAGEM = {
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/png": {".png"},
+    "image/webp": {".webp"},
+}
+TIPOS_VIDEO = {"video/mp4": {".mp4"}}
+LIMITE_IMAGEM_BYTES = 5 * 1024 * 1024
+LIMITE_VIDEO_BYTES = 10 * 1024 * 1024
 async def salvar_imagem_upload(imagem: UploadFile) -> str:
-    """Salva uma imagem enviada via multipart e retorna a URL publica."""
-    if not imagem.content_type or not imagem.content_type.startswith("image/"):
+    """Salva uma imagem ou um MP4 pequeno e retorna a URL publica."""
+    content_type = (imagem.content_type or "").lower()
+    extensao = Path(imagem.filename or "").suffix.lower()
+    tipos_aceitos = {**TIPOS_IMAGEM, **TIPOS_VIDEO}
+    if content_type not in tipos_aceitos or extensao not in tipos_aceitos[content_type]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Envie um arquivo de imagem valido.",
+            detail="Envie uma imagem JPG, PNG ou WebP, ou um video MP4.",
         )
 
-    extensao = Path(imagem.filename or "").suffix.lower()
+    limite = LIMITE_VIDEO_BYTES if content_type in TIPOS_VIDEO else LIMITE_IMAGEM_BYTES
+    conteudo = await imagem.read(limite + 1)
+    if len(conteudo) > limite:
+        limite_mb = limite // (1024 * 1024)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"O arquivo deve ter no maximo {limite_mb} MB.",
+        )
+
     nome_arquivo = f"{uuid4()}{extensao}"
     caminho = UPLOAD_DIR / nome_arquivo
 
     with caminho.open("wb") as buffer:
-        buffer.write(await imagem.read())
+        buffer.write(conteudo)
 
     return f"/uploads/sobre_nos/{nome_arquivo}"
 
@@ -59,7 +77,7 @@ async def criar_imagem(
     posicao: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Adiciona uma nova imagem ao carrossel via upload multipart. Requer role administrador."""
+    """Adiciona uma imagem ou video MP4 ao carrossel. Requer role administrador."""
     imagem_url = await salvar_imagem_upload(imagem)
     try:
         return repository.criar_imagem(db, SobreNosImagemCreate(imagem_url=imagem_url, posicao=posicao))

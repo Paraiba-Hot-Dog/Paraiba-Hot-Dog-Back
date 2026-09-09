@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     frontend_base_url: str = "http://localhost:5173"
     reset_senha_token_minutos: int = 30
+    local_auth_enabled: bool = False
+    local_auth_secret: str = ""
 
 
 settings = Settings()
