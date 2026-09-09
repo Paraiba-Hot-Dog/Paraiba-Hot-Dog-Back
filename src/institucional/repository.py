@@ -18,6 +18,7 @@ def obter_sobre_nos(db: Session) -> SobreNos:
 def atualizar_sobre_nos(db: Session, data: SobreNosUpdate) -> SobreNos:
     conteudo = obter_sobre_nos(db)
     conteudo.texto = data.texto
+    conteudo.estatisticas = [item.model_dump() for item in data.estatisticas]
     db.commit()
     db.refresh(conteudo)
     return conteudo
