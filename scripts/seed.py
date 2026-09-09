@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.blog.model import Blog, TipoNoticiaPromocao
 from src.clientes.model import Cliente
 from src.database import Base, SessionLocal
+from src.duvidas.model import DuvidaFrequente
 from src.pedidos.model import (
     FormaPagamento,
     ItemPedido,
@@ -120,6 +121,31 @@ def criar_blog(db: Session) -> None:
         ),
     ]
     db.add_all(posts)
+
+
+def criar_duvidas(db: Session) -> None:
+    """Cadastra as duvidas frequentes exibidas na pagina inicial."""
+    dados_duvidas = [
+        (
+            "Quais são os horários de funcionamento?",
+            "Funcionamos todos os dias, das 17:00 às 23:00",
+        ),
+        ("Vocês fazem delivery?", "Sim, fazemos delivery pelo iFood"),
+        (
+            "Tem opções vegetarianas?",
+            "Sim, contamos com opções vegetarianas deliciosas no nosso cardápio!",
+        ),
+        (
+            "Posso personalizar meu hot dog?",
+            "Sim, você pode personalizar seu hot dog escolhendo os ingredientes que preferir.",
+        ),
+        ("Vocês aceitam cartão?", "Sim, aceitamos débito e crédito."),
+    ]
+    duvidas = [
+        DuvidaFrequente(pergunta=pergunta, resposta=resposta, ordem=ordem, ativo=True)
+        for ordem, (pergunta, resposta) in enumerate(dados_duvidas)
+    ]
+    db.add_all(duvidas)
 
 
 def criar_clientes(db: Session) -> list[Cliente]:
@@ -722,6 +748,7 @@ def run() -> None:
         permissoes = criar_permissoes(db)
         unidades = criar_unidades(db)
         criar_blog(db)
+        criar_duvidas(db)
         clientes = criar_clientes(db)
         criar_usuario(db, unidades[0], permissoes)
         seed_smashdogs(db, unidades)
