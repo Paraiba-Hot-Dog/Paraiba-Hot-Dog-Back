@@ -41,9 +41,10 @@ def criar_avaliacao(db: Session, data: AvaliacaoCreate) -> Avaliacao:
 def atualizar_avaliacao(
     db: Session, avaliacao_id: int, data: AvaliacaoUpdate
 ) -> Avaliacao:
-    """Altera a visibilidade de uma avaliacao (exibida ou oculta no site)."""
+    """Atualiza parcialmente os dados de uma avaliacao (visibilidade, texto e nota)."""
     avaliacao = obter_avaliacao(db, avaliacao_id)
-    avaliacao.ativo = data.ativo
+    for campo, valor in data.model_dump(exclude_unset=True).items():
+        setattr(avaliacao, campo, valor)
     db.commit()
     db.refresh(avaliacao)
     return avaliacao
