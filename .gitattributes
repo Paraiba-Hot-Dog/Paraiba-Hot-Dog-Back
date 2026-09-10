@@ -1,0 +1,12 @@
+# Força quebras de linha LF (Linux/Unix)
+# Evita que commits feitos no Windows alterem o projeto todo por causa de CRLF
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.lock binary
