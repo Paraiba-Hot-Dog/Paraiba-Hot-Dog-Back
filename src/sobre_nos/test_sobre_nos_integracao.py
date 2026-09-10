@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from src.database import Base, get_db
 from src.main import app
 from src.security import get_current_user
+from src.sobre_nos import router as sobre_nos_router
 from src.sobre_nos.model import SobreNosImagem
 
 client = TestClient(app)
@@ -122,8 +123,6 @@ def test_criar_imagem_sem_role_administrador_retorna_403(override_get_db, authen
 
 def test_criar_imagem_como_administrador(tmp_path, monkeypatch, override_get_db, authenticated_admin):
     """Garante que um administrador consegue cadastrar uma nova imagem via upload."""
-    from src.sobre_nos import router as sobre_nos_router
-
     upload_dir = tmp_path / "uploads" / "sobre_nos"
     upload_dir.mkdir(parents=True)
     monkeypatch.setattr(sobre_nos_router, "UPLOAD_DIR", upload_dir)
@@ -140,10 +139,10 @@ def test_criar_imagem_como_administrador(tmp_path, monkeypatch, override_get_db,
     assert len(list(upload_dir.iterdir())) == 1
 
 
-def test_criar_imagem_rejeita_arquivo_nao_imagem(tmp_path, monkeypatch, override_get_db, authenticated_admin):
+def test_criar_imagem_rejeita_arquivo_nao_imagem(
+    tmp_path, monkeypatch, override_get_db, authenticated_admin
+):
     """Garante que apenas arquivos de imagem sao aceitos."""
-    from src.sobre_nos import router as sobre_nos_router
-
     upload_dir = tmp_path / "uploads" / "sobre_nos"
     upload_dir.mkdir(parents=True)
     monkeypatch.setattr(sobre_nos_router, "UPLOAD_DIR", upload_dir)
@@ -156,10 +155,10 @@ def test_criar_imagem_rejeita_arquivo_nao_imagem(tmp_path, monkeypatch, override
     assert not list(upload_dir.iterdir())
 
 
-def test_criar_video_mp4_como_administrador(tmp_path, monkeypatch, override_get_db, authenticated_admin):
+def test_criar_video_mp4_como_administrador(
+    tmp_path, monkeypatch, override_get_db, authenticated_admin
+):
     """Aceita MP4 pequeno e preserva a extensao para o frontend identificar o video."""
-    from src.sobre_nos import router as sobre_nos_router
-
     upload_dir = tmp_path / "uploads" / "sobre_nos"
     upload_dir.mkdir(parents=True)
     monkeypatch.setattr(sobre_nos_router, "UPLOAD_DIR", upload_dir)
@@ -178,8 +177,6 @@ def test_criar_video_rejeita_arquivo_maior_que_limite(
     tmp_path, monkeypatch, override_get_db, authenticated_admin
 ):
     """Rejeita MP4 acima do limite antes de gravar o arquivo."""
-    from src.sobre_nos import router as sobre_nos_router
-
     upload_dir = tmp_path / "uploads" / "sobre_nos"
     upload_dir.mkdir(parents=True)
     monkeypatch.setattr(sobre_nos_router, "UPLOAD_DIR", upload_dir)
@@ -201,10 +198,10 @@ def test_atualizar_ordem_como_administrador(override_get_db, authenticated_admin
     assert response.json()["ordem"] == 5
 
 
-def test_excluir_imagem_remove_registro_e_arquivo(tmp_path, monkeypatch, override_get_db, authenticated_admin, db_session):
+def test_excluir_imagem_remove_registro_e_arquivo(
+    tmp_path, monkeypatch, override_get_db, authenticated_admin, db_session
+):
     """Garante que excluir remove o registro do banco e o arquivo fisico."""
-    from src.sobre_nos import router as sobre_nos_router
-
     upload_dir = tmp_path / "uploads" / "sobre_nos"
     upload_dir.mkdir(parents=True)
     monkeypatch.setattr(sobre_nos_router, "UPLOAD_DIR", upload_dir)
