@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
+from src.auth.local_auth import decode_token as decode_local_token
 from src.config import settings
 from src.database import SessionLocal
 from src.usuarios.model import Usuario
@@ -75,6 +76,8 @@ def _get_signing_key(token: str) -> dict[str, Any]:
 
 def decode_supabase_token(token: str) -> dict[str, Any]:
     """Valida o JWT do Supabase Auth e retorna o payload."""
+    if settings.local_auth_enabled:
+        return decode_local_token(token)
     key = _get_signing_key(token)
     try:
         payload = jwt.decode(
@@ -102,40 +105,82 @@ def get_current_user(
     return decode_supabase_token(credentials.credentials)
 
 
+_FUNCOES_VALIDAS = {"administrador", "caixa", "cozinha"}
+
+
+def _sem_permissao() -> HTTPException:
+    """Resposta 403 padronizada para falta de role na aplicacao."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Usuario sem permissao para acessar este recurso",
+    )
+
+
+def _email_do_token(user: dict[str, Any]) -> str | None:
+    """Extrai um e-mail utilizavel do payload JWT, no mesmo criterio do front."""
+    email = user.get("email") or user.get("preferred_username")
+    if isinstance(email, str) and "@" in email:
+        return email
+    return None
+
+
+def _funcao_do_token(user: dict[str, Any]) -> str | None:
+    """Le a funcao da aplicacao no metadata do token, ignorando o role 'authenticated' do Supabase."""
+    metadata = user.get("user_metadata")
+    if isinstance(metadata, dict) and metadata.get("funcao") in _FUNCOES_VALIDAS:
+        return metadata["funcao"]
+
+    app_metadata = user.get("app_metadata")
+    if isinstance(app_metadata, dict) and app_metadata.get("role") in _FUNCOES_VALIDAS:
+        return app_metadata["role"]
+
+    return None
+
+
+def buscar_usuario_por_claims(db, user: dict[str, Any]) -> Usuario | None:
+    """Localiza o usuario pelo ID do provedor de auth e, se faltar, pelo e-mail do token."""
+    sub = user.get("sub")
+    if sub:
+        usuario = db.query(Usuario).filter(Usuario.auth_provider_id == sub).first()
+        if usuario:
+            return usuario
+
+    email = _email_do_token(user)
+    if email:
+        return db.query(Usuario).filter(Usuario.email == email).first()
+
+    return None
+
+
 def require_roles(*required_roles: str):
     """Cria uma dependencia FastAPI que exige pelo menos uma das roles informadas."""
 
     def dependency(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
         """Valida se o usuario autenticado possui alguma role exigida."""
         # Suporte para testes que injetam as roles diretamente no mock do get_current_user
-        if "roles" in user:
-            user_roles = set(user["roles"])
-            if user_roles.intersection(required_roles):
+        raw_roles = user.get("roles")
+        if isinstance(raw_roles, (list, tuple, set)):
+            if set(raw_roles).intersection(required_roles):
                 return user
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Usuario sem permissao para acessar este recurso",
-            )
-
-        sub = user.get("sub")
-        if not sub:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Usuario sem permissao para acessar este recurso",
-            )
+            raise _sem_permissao()
 
         db = SessionLocal()
         try:
-            usuario = db.query(Usuario).filter(Usuario.auth_provider_id == sub).first()
-            if not usuario or usuario.funcao.value not in required_roles:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Usuario sem permissao para acessar este recurso",
-                )
+            usuario = buscar_usuario_por_claims(db, user)
         finally:
             db.close()
 
-        user["roles"] = [usuario.funcao.value]
-        return user
+        if usuario:
+            if usuario.funcao.value not in required_roles:
+                raise _sem_permissao()
+            user["roles"] = [usuario.funcao.value]
+            return user
+
+        funcao_token = _funcao_do_token(user)
+        if funcao_token in required_roles:
+            user["roles"] = [funcao_token]
+            return user
+
+        raise _sem_permissao()
 
     return dependency

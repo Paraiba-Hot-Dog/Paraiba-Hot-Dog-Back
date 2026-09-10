@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from src.auth import repository
 from src.auth.supabase_auth import login as supabase_login
 from src.database import get_db
+from src.config import settings
+from src.auth.local_auth import login as local_login
 
 router = APIRouter()
 
@@ -36,9 +38,12 @@ class RedefinirSenhaRequest(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest) -> LoginResponse:
+def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     """Autentica um usuario via Supabase Auth e retorna o token JWT."""
-    result = supabase_login(str(payload.email), payload.password)
+    if settings.local_auth_enabled:
+        result = local_login(db, str(payload.email), payload.password)
+    else:
+        result = supabase_login(str(payload.email), payload.password)
     return LoginResponse(
         access_token=result["access_token"],
         token_type=result.get("token_type", "bearer"),
