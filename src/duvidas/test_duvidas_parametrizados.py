@@ -172,4 +172,3 @@ def test_rotas_publicas_sem_autenticacao_retornam_200(
     resp_obter = client.get(f"/duvidas/{duvida_valida.id}")
     assert resp_obter.status_code == 200
     assert resp_obter.json()["id"] == duvida_valida.id
-

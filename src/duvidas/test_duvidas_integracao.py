@@ -218,4 +218,3 @@ def test_excluir_duvida_inexistente_retorna_404(override_get_db):
     response = client.delete("/duvidas/99999")
     assert response.status_code == 404
     assert response.json()["detail"] == "Duvida nao encontrada"
-
