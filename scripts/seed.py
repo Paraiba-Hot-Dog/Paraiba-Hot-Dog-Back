@@ -1,13 +1,19 @@
 """Limpa o banco e popula dados iniciais reais para desenvolvimento."""
 
+import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from dotenv import load_dotenv
+
+# Carrega as variáveis de ambiente do .env
+load_dotenv()
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.blog.model import Blog, TipoNoticiaPromocao
 from src.clientes.model import Cliente
+from src.avaliacoes.model import Avaliacao
 from src.database import Base, SessionLocal
 from src.duvidas.model import DuvidaFrequente
 from src.pedidos.model import (
@@ -51,34 +57,49 @@ def criar_permissoes(db: Session) -> list[Permissao]:
 
 
 def criar_unidades(db: Session) -> list[Unidade]:
-    """Cadastra as unidades reais de Aguas Claras."""
+    """Cadastra as unidades oficiais reais da Paraiba Hot Dog."""
     dados_unidades = [
         {
-            "nome": "Unidade Aguas Claras (Avenida Jequitiba)",
-            "abertura": time(18, 0),
+            "nome": "Unidade Asa Sul",
+            "abertura": time(11, 0),
             "fechamento": time(23, 0),
-            "descricao": "Unidade da Avenida Jequitiba em Aguas Claras.",
+            "descricao": "Unidade de atendimento na Asa Sul.",
             "endereco": {
-                "cep": "70297400",
-                "logradouro": "Av. Jequitiba Praca Tangara",
-                "numero": None,
-                "complemento": None,
+                "cep": "70390025",
+                "logradouro": "CLS 308 Bloco B",
+                "numero": "12",
+                "complemento": "Loja 4",
+                "bairro": "Asa Sul",
+                "cidade": "Brasilia",
+                "estado": "DF",
+            },
+        },
+        {
+            "nome": "Unidade Aguas Claras",
+            "abertura": time(11, 0),
+            "fechamento": time(23, 0),
+            "descricao": "Unidade de atendimento em Aguas Claras.",
+            "endereco": {
+                "cep": "71900000",
+                "logradouro": "Avenida das Castanheiras",
+                "numero": "500",
+                "complemento": "Quiosque 2",
                 "bairro": "Aguas Claras",
                 "cidade": "Brasilia",
                 "estado": "DF",
             },
         },
         {
-            "nome": "Unidade Aguas Claras (Avenida das Araucarias)",
-            "abertura": time(17, 0),
-            "fechamento": time(23, 0),
-            "descricao": "Unidade da Avenida das Araucarias em Aguas Claras.",
+            "nome": "Unidade Taguatinga",
+            "abertura": time(10, 30),
+            "fechamento": time(22, 30),
+            "descricao": "Unidade de atendimento em Taguatinga.",
             "endereco": {
-                "cep": "70297400",
-                "logradouro": "Av. das Araucarias",
-                "numero": "1395",
+                "cep": "72010010",
+                "logradouro": "Avenida Comercial Norte",
+                "numero": "150",
                 "complemento": None,
-                "bairro": "Aguas Claras",
+                "bairro": "Taguatinga Norte",
                 "cidade": "Brasilia",
                 "estado": "DF",
             },
@@ -148,6 +169,28 @@ def criar_duvidas(db: Session) -> None:
     db.add_all(duvidas)
 
 
+
+def criar_avaliacoes(db: Session) -> None:
+    """Cadastra avaliações reais de clientes com estrelas e depoimentos."""
+    dados_avaliacoes = [
+        ("Rodrigo Santos", "O melhor hot dog prensado de Águas Claras! Molho especial sensacional.", 5),
+        ("Camila Rocha", "Entrega super rápida e o lanche chegou quentinho. O de bacon é perfeito!", 5),
+        ("Lucas Mendes", "Ambiente muito agradável e atendimento nota 10. Recomendo demais!", 5),
+        ("Beatriz Silveira", "Excelente custo-benefício. Lanche caprichado e bem recheado.", 4),
+        ("Felipe Oliveira", "Smash dog crocante e saboroso, virou parada obrigatória no fim de semana.", 5),
+    ]
+    avaliacoes = [
+        Avaliacao(
+            nome_cliente=nome,
+            descricao=descricao,
+            estrelas=estrelas,
+            ativo=True,
+        )
+        for nome, descricao, estrelas in dados_avaliacoes
+    ]
+    db.add_all(avaliacoes)
+
+
 def criar_clientes(db: Session) -> list[Cliente]:
     """Cadastra clientes iniciais para testes manuais e pedidos fake."""
     dados_clientes = [
@@ -155,6 +198,11 @@ def criar_clientes(db: Session) -> list[Cliente]:
         ("Mariana Alves", "61999990002", "mariana.alves@example.com", 6),
         ("Pedro Lima", "61999990003", "pedro.lima@example.com", 3),
         ("Ana Beatriz", "61999990004", "ana.beatriz@example.com", 9),
+        ("Bruno Carvalho", "61988880005", "bruno.carvalho@example.com", 15),
+        ("Carlos Eduardo", "61988880006", "carlos.eduardo@example.com", 0),
+        ("Fernanda Souza", "61977770007", "fernanda.souza@example.com", 8),
+        ("Lucas Gabriel", "61977770008", "lucas.gabriel@example.com", 20),
+        ("Zilda Santos", "61966660009", "zilda.santos@example.com", 5),
     ]
     clientes = [
         Cliente(
@@ -171,17 +219,13 @@ def criar_clientes(db: Session) -> list[Cliente]:
     return clientes
 
 
-import os
-
 def criar_usuario(db: Session, unidade: Unidade, permissoes: list[Permissao]) -> Usuario:
-    """Cadastra um usuario administrador local para testes manuais.
-    Para conseguir logar, coloque o SUPABASE_DEV_ADMIN_UID no seu .env.
-    """
-    admin_uid = os.getenv("SUPABASE_DEV_ADMIN_UID")
-    admin_email = os.getenv("SUPABASE_DEV_ADMIN_EMAIL")
+    """Cadastra o usuario administrador principal para login no frontend."""
+    admin_uid = os.getenv("SUPABASE_DEV_ADMIN_UID") or "a8845965-dc2f-4bd6-a83d-6892376927c3"
+    admin_email = os.getenv("SUPABASE_DEV_ADMIN_EMAIL") or "dev@teste.com"
 
     usuario = Usuario(
-        nome="Tigrinho",
+        nome="Administrador",
         email=admin_email,
         senha=None,
         funcao=FuncaoUsuario.administrador,
@@ -731,8 +775,8 @@ def seed_pedidos_bi(db: Session, unidades: list[Unidade], clientes: list[Cliente
         ]
         _criar_pedido_fake(
             db,
-            unidade=unidades[unidade_idx],
-            cliente=clientes[cliente_idx] if cliente_idx is not None else None,
+            unidade=unidades[unidade_idx % len(unidades)],
+            cliente=clientes[cliente_idx % len(clientes)] if cliente_idx is not None else None,
             momento=_momento_pedido(dias, hora, minuto),
             itens=itens,
             forma_pagamento=pagamento,
@@ -749,6 +793,7 @@ def run() -> None:
         unidades = criar_unidades(db)
         criar_blog(db)
         criar_duvidas(db)
+        criar_avaliacoes(db)
         clientes = criar_clientes(db)
         criar_usuario(db, unidades[0], permissoes)
         seed_smashdogs(db, unidades)
