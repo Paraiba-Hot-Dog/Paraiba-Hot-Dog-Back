@@ -19,7 +19,13 @@ from src.produtos.router import router as produtos_router
 from src.unidades.router import router as unidades_router
 from src.permissoes.router import router as permissoes_router
 from src.blog.router import router as blog_router
+from src.duvidas.router import router as duvidas_router
 from src.pedidos.router import router as pedidos_router
+from src.avaliacoes.router import router as avaliacoes_router
+from src.sobre_nos.router import (
+    compat_router as sobre_nos_compat_router,
+    router as sobre_nos_router,
+)
 from src.security import get_current_user
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -121,6 +127,11 @@ app.include_router(
     tags=["blog"],
 )
 app.include_router(
+    duvidas_router,
+    prefix="/duvidas",
+    tags=["duvidas"],
+)
+app.include_router(
     pedidos_router,
     prefix="/pedidos",
     tags=["pedidos"],
@@ -131,6 +142,19 @@ app.include_router(
     prefix="/bi",
     tags=["bi"],
     dependencies=auth_dependencies,
+)
+app.include_router(
+    avaliacoes_router,
+    prefix="/avaliacoes",
+    tags=["avaliacoes"],
+)
+app.include_router(
+    sobre_nos_router,
+    prefix="/sobre-nos",
+    tags=["sobre-nos"],
+)
+app.include_router(
+    sobre_nos_compat_router,
 )
 
 
