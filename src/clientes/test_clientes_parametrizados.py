@@ -9,9 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from src.clientes.model import Cliente
+from src.clientes.model import Cliente, ClienteAjustePontos, MotivoAjustePontos
 from src.database import Base, get_db
 from src.main import app
+from src.usuarios.model import Usuario
 
 client = TestClient(app)
 
@@ -293,3 +294,128 @@ class TestListagemClientes:
         pagina2 = client.get("/clientes/", params={"skip": 2, "limit": 2})
         assert _nomes(pagina1) == ["ana costa", "Bruno Dias"]
         assert _nomes(pagina2) == ["Carla Souza", "carlos Andrade"]
+
+
+@pytest.fixture
+def motivos(db_session):
+    """Cria um motivo comum e um que exige observacao."""
+    correcao = MotivoAjustePontos(descricao="Correcao de falha no ganho de pontos")
+    outro = MotivoAjustePontos(descricao="Outro", exige_observacao=True)
+    inativo = MotivoAjustePontos(descricao="Motivo antigo", ativo=False)
+    db_session.add_all([correcao, outro, inativo])
+    db_session.commit()
+    return {"correcao": correcao, "outro": outro, "inativo": inativo}
+
+
+def _ajuste(motivo, operacao="adicionar", quantidade=2, observacao=None) -> dict:
+    """Monta o corpo de um PATCH contendo apenas um ajuste de pontos."""
+    return {
+        "ajuste_pontos": {
+            "operacao": operacao,
+            "quantidade": quantidade,
+            "motivo_id": motivo.id,
+            "observacao": observacao,
+        }
+    }
+
+
+class TestAjustePontos:
+    """Testes do ajuste manual de pontos de fidelidade via PATCH."""
+
+    def test_lista_apenas_motivos_ativos(self, override_get_db, motivos):
+        """Motivos inativos nao sao oferecidos para selecao."""
+        response = client.get("/clientes/pontos/motivos")
+        assert response.status_code == 200
+        assert [m["descricao"] for m in response.json()] == ["Correcao de falha no ganho de pontos", "Outro"]
+
+    def test_adicionar_pontos_atualiza_saldo_e_registra_auditoria(
+        self, override_get_db, db_session, cliente_valido, motivos
+    ):
+        """Adicionar pontos devolve o saldo novo e grava o historico com o usuario."""
+        usuario = Usuario(nome="Admin", email="admin@email.com", auth_provider_id="test-user")
+        db_session.add(usuario)
+        db_session.commit()
+
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json=_ajuste(motivos["correcao"], quantidade=5, observacao="  pontos da compra 123  "),
+        )
+        assert response.status_code == 200
+        assert response.json()["pontos_fidelidade"] == 8
+
+        historico = client.get(f"/clientes/{cliente_valido.id}/pontos/historico").json()
+        assert len(historico) == 1
+        assert historico[0]["pontos_anterior"] == 3
+        assert historico[0]["pontos_atual"] == 8
+        assert historico[0]["motivo"]["descricao"] == "Correcao de falha no ganho de pontos"
+        assert historico[0]["observacao"] == "pontos da compra 123"
+        assert historico[0]["usuario_id"] == usuario.id
+        assert historico[0]["usuario_nome"] == "Admin"
+
+    def test_remover_pontos_ate_zerar(self, override_get_db, cliente_valido, motivos):
+        """E permitido remover exatamente o saldo atual."""
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json=_ajuste(motivos["correcao"], operacao="remover", quantidade=3),
+        )
+        assert response.status_code == 200
+        assert response.json()["pontos_fidelidade"] == 0
+
+    def test_remover_mais_que_o_saldo_e_rejeitado(
+        self, override_get_db, db_session, cliente_valido, motivos
+    ):
+        """Remocao acima do saldo retorna 422 e nao altera saldo, nome nem historico."""
+        payload = _ajuste(motivos["correcao"], operacao="remover", quantidade=4)
+        payload["nome"] = "Nome Que Nao Deve Persistir"
+        response = client.patch(f"/clientes/{cliente_valido.id}", json=payload)
+        assert response.status_code == 422
+        assert "saldo atual" in response.json()["detail"]
+
+        db_session.expire_all()
+        cliente = client.get(f"/clientes/{cliente_valido.id}").json()
+        assert cliente["pontos_fidelidade"] == 3
+        assert cliente["nome"] == "Maria Silva"
+        assert db_session.query(ClienteAjustePontos).count() == 0
+
+    def test_motivo_que_exige_observacao_sem_observacao(self, override_get_db, cliente_valido, motivos):
+        """Motivo como 'Outro' exige observacao preenchida (espacos nao contam)."""
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json=_ajuste(motivos["outro"], observacao="   "),
+        )
+        assert response.status_code == 422
+        assert "Observacao obrigatoria" in response.json()["detail"]
+
+    @pytest.mark.parametrize("motivo_id", [9999, "inativo"])
+    def test_motivo_invalido_ou_inativo(self, override_get_db, cliente_valido, motivos, motivo_id):
+        """Motivo inexistente ou desativado e rejeitado."""
+        if motivo_id == "inativo":
+            motivo_id = motivos["inativo"].id
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json={"ajuste_pontos": {"operacao": "adicionar", "quantidade": 1, "motivo_id": motivo_id}},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Motivo de ajuste invalido"
+
+    @pytest.mark.parametrize("quantidade", [0, -1])
+    def test_quantidade_deve_ser_positiva(self, override_get_db, cliente_valido, motivos, quantidade):
+        """Quantidade zero ou negativa e barrada na validacao."""
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json=_ajuste(motivos["correcao"], quantidade=quantidade),
+        )
+        assert response.status_code == 422
+
+    def test_patch_nao_aceita_saldo_direto(self, override_get_db, cliente_valido):
+        """O saldo nao pode ser sobrescrito sem passar pelo ajuste com motivo."""
+        response = client.patch(
+            f"/clientes/{cliente_valido.id}",
+            json={"pontos_fidelidade": 100},
+        )
+        assert response.status_code == 422
+
+    def test_historico_de_cliente_inexistente(self, override_get_db):
+        """Historico de cliente inexistente retorna 404."""
+        response = client.get("/clientes/9999/pontos/historico")
+        assert response.status_code == 404
