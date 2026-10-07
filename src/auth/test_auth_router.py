@@ -99,7 +99,7 @@ def test_esqueci_senha_retorna_erro_quando_email_nao_e_enviado(db_session, monke
     assert resultado["email_status"] == "error"
 
 
-def test_esqueci_senha_bloqueia_reenvio_enquanto_o_link_vale(db_session, monkeypatch):
+def test_esqueci_senha_bloqueia_reenvio_durante_o_intervalo(db_session, monkeypatch):
     agora = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
     monkeypatch.setattr("src.auth.repository._agora", lambda: agora)
     _usuario(db_session)
@@ -112,14 +112,15 @@ def test_esqueci_senha_bloqueia_reenvio_enquanto_o_link_vale(db_session, monkeyp
     resultado = solicitar_recuperacao_senha(db_session, "maria@example.com")
 
     assert resultado["email_status"] == "cooldown"
-    assert resultado["aguardar_segundos"] == 1800
+    assert resultado["aguardar_segundos"] == 60
     assert resultado["link_valido_minutos"] == 30
     assert db_session.query(RecuperacaoSenhaToken).count() == 1
 
 
-def test_esqueci_senha_bloqueia_terceiro_email_na_mesma_hora(db_session, monkeypatch):
+def test_esqueci_senha_bloqueia_quando_atinge_limite_por_hora(db_session, monkeypatch):
     agora = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
     monkeypatch.setattr("src.auth.repository._agora", lambda: agora)
+    monkeypatch.setattr("src.auth.repository.settings.reset_senha_limite_por_hora", 2)
     enviados = []
     monkeypatch.setattr(
         "src.auth.repository.enviar_recuperacao_senha",

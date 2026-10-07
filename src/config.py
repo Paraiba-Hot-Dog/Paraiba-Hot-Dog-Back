@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     frontend_base_url: str = "http://localhost:3000"
     reset_senha_token_minutos: int = 30
-    reset_senha_intervalo_segundos: int = 1800
-    reset_senha_limite_por_hora: int = 2
+    reset_senha_intervalo_segundos: int = 60
+    reset_senha_limite_por_hora: int = 30
 
 
 settings = Settings()

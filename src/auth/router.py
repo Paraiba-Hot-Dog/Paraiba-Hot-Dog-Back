@@ -30,8 +30,8 @@ class EsqueciSenhaResponse(BaseModel):
     email_status: str
     aguardar_segundos: int = 0
     link_valido_minutos: int = 30
-    intervalo_segundos: int = 1800
-    limite_por_hora: int = 2
+    intervalo_segundos: int = 60
+    limite_por_hora: int = 30
 
 
 class RedefinirSenhaRequest(BaseModel):

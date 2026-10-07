@@ -90,21 +90,15 @@ def _buscar_usuario_por_email(db: Session, email: str) -> Usuario | None:
     )
 
 
-def solicitar_recuperacao_senha(db: Session, email: str) -> dict:
-    usuario = _buscar_usuario_por_email(db, email)
-    if usuario is None:
-        return _resposta(MENSAGEM_RECUPERACAO, "skipped")
-
-    agora = _agora()
+def _verificar_limites_envio(db: Session, usuario: Usuario, agora: datetime) -> dict | None:
     ultimo = _ultimo_pedido(db, usuario.id)
     if ultimo is not None:
         espera = _segundos_ate(ultimo.created_at, agora, settings.reset_senha_intervalo_segundos)
         if espera > 0:
-            minutos = max(math.ceil(espera / 60), 1)
-            unidade = "minuto" if minutos == 1 else "minutos"
+            unidade = "segundo" if espera == 1 else "segundos"
             return _resposta(
-                f"O link enviado expira em {minutos} {unidade}. "
-                "Um novo e-mail só pode ser enviado quando ele expirar.",
+                "Já enviamos um e-mail de recuperação. Confira a caixa de entrada e o spam. "
+                f"Você poderá pedir um novo em {espera} {unidade}.",
                 "cooldown",
                 espera,
             )
@@ -121,6 +115,19 @@ def solicitar_recuperacao_senha(db: Session, email: str) -> dict:
             "limite",
             espera,
         )
+
+    return None
+
+
+def solicitar_recuperacao_senha(db: Session, email: str) -> dict:
+    usuario = _buscar_usuario_por_email(db, email)
+    if usuario is None:
+        return _resposta(MENSAGEM_RECUPERACAO, "skipped")
+
+    agora = _agora()
+    bloqueio = _verificar_limites_envio(db, usuario, agora)
+    if bloqueio is not None:
+        return bloqueio
 
     db.query(RecuperacaoSenhaToken).filter(
         RecuperacaoSenhaToken.usuario_id == usuario.id,
@@ -145,7 +152,9 @@ def solicitar_recuperacao_senha(db: Session, email: str) -> dict:
         db.commit()
         limite = any(termo in motivo.lower() for termo in ("rate", "limit"))
         return _resposta(
-            MENSAGEM_LIMITE if limite else "Não foi possível enviar o e-mail de recuperação. Tente novamente em instantes.",
+            MENSAGEM_LIMITE
+            if limite
+            else "Não foi possível enviar o e-mail de recuperação. Tente novamente em instantes.",
             "error",
             settings.reset_senha_intervalo_segundos if limite else 0,
         )
