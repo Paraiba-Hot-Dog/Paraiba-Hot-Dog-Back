@@ -25,6 +25,7 @@ def _request(
     *,
     data: dict[str, Any] | None = None,
     use_service_role: bool = False,
+    bearer: str | None = None,
 ) -> tuple[int, Any]:
     """Executa uma requisicao HTTP ao Supabase Auth e retorna (status, body)."""
     headers: dict[str, str] = {
@@ -32,7 +33,9 @@ def _request(
         "apikey": settings.supabase_service_role_key,
     }
 
-    if use_service_role:
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    elif use_service_role:
         headers["Authorization"] = f"Bearer {settings.supabase_service_role_key}"
 
     body = json.dumps(data).encode("utf-8") if data else None
@@ -75,6 +78,22 @@ def login(email: str, password: str) -> dict[str, Any]:
     return body
 
 
+def _erro_auth(body: Any) -> tuple[str, str]:
+    """Extrai codigo e mensagem de uma resposta de erro do Supabase Auth."""
+    if not isinstance(body, dict):
+        return "", "Erro ao criar usuario"
+
+    error_code = str(body.get("error_code") or "").lower()
+    msg = body.get("msg") or body.get("message") or body.get("error_description") or "Erro ao criar usuario"
+    return error_code, str(msg)
+
+
+def _email_duplicado(error_code: str, msg: str) -> bool:
+    """Indica se o Supabase recusou o cadastro porque o e-mail ja existe."""
+    texto = f"{error_code} {msg}".lower()
+    return error_code in {"email_exists", "user_already_exists"} or "already" in texto
+
+
 def signup(email: str, password: str, user_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     """Cria um novo usuario no Supabase Auth e retorna seus dados."""
     payload: dict[str, Any] = {
@@ -93,9 +112,14 @@ def signup(email: str, password: str, user_metadata: dict[str, Any] | None = Non
     )
 
     if status_code not in (200, 201):
-        msg = body.get("msg") or body.get("message") or "Erro ao criar usuario"
-        if "already" in msg.lower() or status_code == 422:
+        error_code, msg = _erro_auth(body)
+        if _email_duplicado(error_code, msg):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email ja cadastrado no auth")
+        if error_code == "weak_password" or "password" in msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A senha nao atende aos requisitos. Use pelo menos 8 caracteres.",
+            )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=msg)
 
     return body
@@ -125,6 +149,63 @@ def update_user(user_id: str, *, email: str | None = None, password: str | None 
     if status_code not in (200, 204):
         msg = body.get("msg") or body.get("message") or "Erro ao atualizar usuario"
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=msg)
+
+
+def enviar_email_recuperacao(email: str, redirect_to: str) -> dict:
+    """Pede ao Supabase que envie o link de recuperacao para a caixa da pessoa."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        return {"status": "skipped", "reason": "missing_supabase"}
+
+    status_code, body = _enviar_recover(email, redirect_to)
+    if status_code not in (200, 201) and _redirecionamento_recusado(body):
+        status_code, body = _enviar_recover(email, None)
+
+    if status_code in (200, 201):
+        return {"status": "sent"}
+
+    error_code, msg = _erro_auth(body)
+    return {"status": "error", "reason": error_code or msg}
+
+
+def atualizar_senha_com_sessao(access_token: str, nova_senha: str) -> None:
+    """Grava a nova senha usando a sessao aberta pelo link do e-mail."""
+    status_code, body = _request(
+        "PUT",
+        _supabase_auth_url("user"),
+        data={"password": nova_senha},
+        bearer=access_token,
+    )
+    if status_code in (200, 204):
+        return
+
+    error_code, msg = _erro_auth(body)
+    if error_code == "weak_password" or "password" in msg.lower():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A senha nao atende aos requisitos. Use pelo menos 8 caracteres.",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Token de recuperacao invalido ou expirado",
+    )
+
+
+def _enviar_recover(email: str, redirect_to: str | None) -> tuple[int, Any]:
+    payload: dict[str, Any] = {"email": email}
+    if redirect_to:
+        payload["redirect_to"] = redirect_to
+    return _request(
+        "POST",
+        _supabase_auth_url("recover"),
+        data=payload,
+        use_service_role=True,
+    )
+
+
+def _redirecionamento_recusado(body: Any) -> bool:
+    _, msg = _erro_auth(body)
+    texto = msg.lower()
+    return "redirect" in texto
 
 
 def delete_user(user_id: str | None) -> None:
