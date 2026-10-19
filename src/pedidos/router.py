@@ -38,10 +38,12 @@ def listar_pedidos(
 @router.get("/cozinha", response_model=list[CozinhaItemRead])
 def listar_cozinha(
     unidade_id: int | None = Query(None, gt=0),
+    incluir_entregues: bool = Query(False),
+    limite_entregues: int = Query(repository.LIMITE_ENTREGUES_COZINHA, gt=0, le=100),
     db: Session = Depends(get_db),
 ) -> list[CozinhaItemRead]:
-    """Lista itens pendentes de preparo para exibicao na tela da cozinha."""
-    return repository.listar_cozinha(db, unidade_id)
+    """Lista itens de preparo da cozinha, opcionalmente com os lotes ja entregues."""
+    return repository.listar_cozinha(db, unidade_id, incluir_entregues, limite_entregues)
 
 
 @router.patch("/cozinha/status", response_model=list[ItemPedidoRead])

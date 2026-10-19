@@ -32,6 +32,9 @@ from src.unidades.model import Unidade
 
 PONTOS_RESGATE_FIDELIDADE = 12
 VALOR_DESCONTO_FIDELIDADE = Decimal("17.00")
+# Quantos lotes entregues a aba "Entregues" da cozinha mostra. O historico completo
+# continua no banco; o limite existe so para a tela nao crescer sem fim.
+LIMITE_ENTREGUES_COZINHA = 30
 
 
 def listar_pedidos(db: Session, filtro: PedidoFiltro) -> list[Pedido]:
@@ -420,17 +423,33 @@ def _status_grupo(itens: list[ItemPedido]) -> StatusItemPedido:
     """Determina o status consolidado de um grupo de itens da cozinha."""
     if any(item.status == StatusItemPedido.preparando for item in itens):
         return StatusItemPedido.preparando
+    if itens and all(item.status == StatusItemPedido.entregue for item in itens):
+        return StatusItemPedido.entregue
     return StatusItemPedido.aberto
 
 
-def listar_cozinha(db: Session, unidade_id: int | None = None) -> list[CozinhaItemRead]:
-    """Lista os itens pendentes de preparo agrupados por produto/lote para exibicao na cozinha."""
+def listar_cozinha(
+    db: Session,
+    unidade_id: int | None = None,
+    incluir_entregues: bool = False,
+    limite_entregues: int = LIMITE_ENTREGUES_COZINHA,
+) -> list[CozinhaItemRead]:
+    """Lista os itens de preparo agrupados por produto/lote para exibicao na cozinha.
+
+    Por padrao devolve apenas a fila pendente. Com incluir_entregues, acrescenta os
+    lotes ja entregues, do mais recente para o mais antigo e limitados a
+    limite_entregues, para alimentar a aba "Entregues" sem crescer sem fim.
+    """
+    status_visiveis = [StatusItemPedido.aberto, StatusItemPedido.preparando]
+    if incluir_entregues:
+        status_visiveis.append(StatusItemPedido.entregue)
+
     query = (
         db.query(ItemPedido)
         .join(ItemPedido.pedido)
         .filter(
             Pedido.status != StatusPedido.cancelado,
-            ItemPedido.status.in_([StatusItemPedido.aberto, StatusItemPedido.preparando]),
+            ItemPedido.status.in_(status_visiveis),
         )
     )
     if unidade_id is not None:
@@ -472,7 +491,16 @@ def listar_cozinha(db: Session, unidade_id: int | None = None) -> list[CozinhaIt
                 ],
             )
         )
-    return resposta
+
+    pendentes = [grupo for grupo in resposta if grupo.status != StatusItemPedido.entregue]
+    if not incluir_entregues:
+        return pendentes
+
+    # Os grupos sairam da query em ordem crescente de criacao; invertendo, os
+    # entregues mais recentes ficam no topo antes de aplicar o limite.
+    entregues = [grupo for grupo in resposta if grupo.status == StatusItemPedido.entregue]
+    entregues.reverse()
+    return pendentes + entregues[:limite_entregues]
 
 
 def atualizar_status_cozinha(db: Session, data: AtualizarStatusCozinha) -> list[ItemPedido]:
@@ -486,11 +514,19 @@ def atualizar_status_cozinha(db: Session, data: AtualizarStatusCozinha) -> list[
     pedido = obter_pedido(db, data.pedido_id)
     _validar_pedido_nao_cancelado(pedido)
 
+    itens_lote = [item for item in pedido.itens if item.lote == data.lote]
+    if not itens_lote:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lote de cozinha nao encontrado")
+
+    # Idempotencia: a tela da cozinha pode reenviar o mesmo status (clique duplo ou
+    # retry) e isso nao deve virar erro depois que o lote ja saiu da fila.
+    if all(item.status == data.status for item in itens_lote):
+        return itens_lote
+
     itens = [
         item
-        for item in pedido.itens
-        if item.lote == data.lote
-        and item.status in {StatusItemPedido.aberto, StatusItemPedido.preparando}
+        for item in itens_lote
+        if item.status in {StatusItemPedido.aberto, StatusItemPedido.preparando}
     ]
     if not itens:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lote de cozinha nao encontrado")

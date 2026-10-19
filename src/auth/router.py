@@ -28,10 +28,15 @@ class EsqueciSenhaRequest(BaseModel):
 class EsqueciSenhaResponse(BaseModel):
     message: str
     email_status: str
+    aguardar_segundos: int = 0
+    link_valido_minutos: int = 30
+    intervalo_segundos: int = 60
+    limite_por_hora: int = 30
 
 
 class RedefinirSenhaRequest(BaseModel):
-    token: str
+    token: str | None = None
+    access_token: str | None = None
     nova_senha: str = Field(min_length=8)
 
 
@@ -58,10 +63,7 @@ def esqueci_senha(
 ) -> EsqueciSenhaResponse:
     resultado = repository.solicitar_recuperacao_senha(db, str(payload.email))
 
-    return EsqueciSenhaResponse(
-        message=resultado["message"],
-        email_status=resultado["email_status"],
-    )
+    return EsqueciSenhaResponse(**resultado)
 
 
 @router.post("/redefinir-senha", status_code=status.HTTP_204_NO_CONTENT)
@@ -69,4 +71,4 @@ def redefinir_senha(
     payload: RedefinirSenhaRequest,
     db: Session = Depends(get_db),
 ) -> None:
-    repository.redefinir_senha(db, payload.token, payload.nova_senha)
+    repository.redefinir_senha(db, payload.token, payload.nova_senha, payload.access_token)

@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.blog.model import Blog, TipoNoticiaPromocao
-from src.clientes.model import Cliente
+from src.clientes.model import Cliente, MotivoAjustePontos
 from src.avaliacoes.model import Avaliacao
 from src.database import Base, SessionLocal
 from src.duvidas.model import DuvidaFrequente
@@ -54,6 +54,23 @@ def criar_permissoes(db: Session) -> list[Permissao]:
     db.add_all(permissoes)
     db.flush()
     return permissoes
+
+
+def criar_motivos_ajuste_pontos(db: Session) -> None:
+    """Recadastra os motivos padrao de ajuste de pontos inseridos pelas migrations."""
+    motivos = [
+        ("Correção de falha no ganho de pontos", False),
+        ("Correção de pontos lançados indevidamente", False),
+        ("Cliente realizou um novo pedido", False),
+        ("Cliente resgatou o bônus de fidelidade", False),
+        ("Outro", True),
+        
+    ]
+    db.add_all(
+        MotivoAjustePontos(descricao=descricao, exige_observacao=exige_observacao)
+        for descricao, exige_observacao in motivos
+    )
+    db.flush()
 
 
 def criar_unidades(db: Session) -> list[Unidade]:
@@ -790,6 +807,7 @@ def run() -> None:
     try:
         limpar_banco(db)
         permissoes = criar_permissoes(db)
+        criar_motivos_ajuste_pontos(db)
         unidades = criar_unidades(db)
         criar_blog(db)
         criar_duvidas(db)

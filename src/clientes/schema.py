@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 import re
 from typing import Optional
 
@@ -26,16 +27,61 @@ class ClienteCreate(ClienteBase):
     pass
 
 
-class ClienteUpdate(ClienteTelefoneMixin):
-    nome: Optional[str] = Field(None, max_length=120)
-    telefone: Optional[str] = Field(None, max_length=20)
-    email: Optional[EmailStr] = Field(None, max_length=120)
-    pontos_fidelidade: Optional[int] = None
-
-
 class ClienteRead(ClienteBase):
     id: int
     data_cadastro: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OperacaoAjustePontos(str, Enum):
+    adicionar = "adicionar"
+    remover = "remover"
+
+
+class AjustePontos(BaseModel):
+    operacao: OperacaoAjustePontos
+    quantidade: int = Field(..., gt=0)
+    motivo_id: int
+    observacao: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("observacao")
+    @classmethod
+    def normalizar_observacao(cls, value: str | None) -> str | None:
+        """Remove espacos das bordas e trata observacao em branco como ausente."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ClienteUpdate(ClienteTelefoneMixin):
+    # O saldo de pontos so muda via ajuste_pontos, que exige motivo e gera auditoria.
+    model_config = ConfigDict(extra="forbid")
+
+    nome: Optional[str] = Field(None, max_length=120)
+    telefone: Optional[str] = Field(None, max_length=20)
+    email: Optional[EmailStr] = Field(None, max_length=120)
+    ajuste_pontos: Optional[AjustePontos] = None
+
+
+class MotivoAjustePontosRead(BaseModel):
+    id: int
+    descricao: str
+    exige_observacao: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AjustePontosRead(BaseModel):
+    id: int
+    cliente_id: int
+    motivo: MotivoAjustePontosRead
+    observacao: Optional[str]
+    pontos_anterior: int
+    pontos_atual: int
+    usuario_id: Optional[int]
+    usuario_nome: Optional[str]
+    data_ajuste: datetime
 
     model_config = ConfigDict(from_attributes=True)
 

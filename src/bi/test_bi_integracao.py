@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 
 import pytest
@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.database import Base, get_db
 from src.bi import repository
+from src.clientes.model import Cliente
 from src.main import app
 from src.pedidos.model import ItemPedido, Pedido, StatusItemPedido, StatusPedido
 from src.produtos.model import Categoria, Produto, ProdutoVariacao, Subcategoria, TipoVariacao
@@ -286,3 +287,189 @@ def test_dashboard_variacao_de_zero_para_venda_retorna_100(db_session):
 
     assert dashboard.kpis.variacao_receita_bruta == Decimal("100.00")
     assert dashboard.top_produtos[0].variacao == Decimal("100.00")
+
+
+def _segunda_unidade(db_session):
+    unidade = Unidade(
+        nome="Unidade Norte",
+        abertura=time(16, 30),
+        fechamento=time(23, 59),
+        descricao="Segunda unidade",
+        endereco=Endereco(
+            cep="70000000",
+            logradouro="Asa Norte",
+            numero="2",
+            bairro="Asa Norte",
+            cidade="Brasilia",
+            estado="DF",
+        ),
+    )
+    db_session.add(unidade)
+    db_session.flush()
+    return unidade
+
+
+@pytest.mark.integration
+def test_dashboard_intervalo_compara_com_periodo_anterior(db_session):
+    """Garante que o intervalo de datas filtra e compara com o periodo anterior de mesmo tamanho."""
+    unidade, produto_a, _produto_b, variacao_a, _variacao_b = _base_bi(db_session)
+
+    def pedido(created_at, valor, quantidade=1):
+        preco = str(Decimal(valor) / quantidade)
+        return _pedido_com_itens(unidade, created_at, valor, valor, [(produto_a, variacao_a, quantidade, preco)])
+
+    db_session.add_all(
+        [
+            # Periodo anterior (01/03 a 10/03): 1 pedido de 100.
+            pedido(datetime(2026, 3, 5, 13), "100.00"),
+            # Periodo filtrado (11/03 a 20/03): 2 pedidos somando 300.
+            pedido(datetime(2026, 3, 11, 12), "100.00"),
+            pedido(datetime(2026, 3, 20, 23), "200.00", quantidade=2),
+            # Fora de qualquer um dos periodos.
+            pedido(datetime(2026, 3, 21, 13), "999.00"),
+        ]
+    )
+    db_session.commit()
+
+    dashboard = repository.obter_dashboard(db_session, data_inicio=date(2026, 3, 11), data_fim=date(2026, 3, 20))
+
+    assert dashboard.kpis.receita_bruta == Decimal("300.00")
+    assert dashboard.kpis.total_pedidos == 2
+    assert dashboard.kpis.variacao_receita_bruta == Decimal("200.00")
+    assert dashboard.kpis.variacao_total_pedidos == Decimal("100.00")
+    assert dashboard.top_produtos[0].variacao == Decimal("200.00")
+    assert dashboard.vendas_por_hora[-1].hora == "23h"
+    assert dashboard.agrupamento_periodo == "dia"
+    assert len(dashboard.vendas_por_periodo) == 10
+    assert dashboard.vendas_por_periodo[0].periodo == "2026-03-11"
+    assert dashboard.vendas_por_periodo[0].receita_bruta == Decimal("100.00")
+    assert dashboard.vendas_por_periodo[1].total_pedidos == 0
+
+
+@pytest.mark.integration
+def test_dashboard_intervalo_longo_agrupa_por_mes(db_session):
+    """Garante que intervalos longos agrupam a serie de vendas por mes."""
+    unidade, produto_a, _produto_b, variacao_a, _variacao_b = _base_bi(db_session)
+    db_session.add(
+        _pedido_com_itens(unidade, datetime(2026, 2, 10, 13), "50.00", "50.00", [(produto_a, variacao_a, 1, "50.00")])
+    )
+    db_session.commit()
+
+    dashboard = repository.obter_dashboard(db_session, data_inicio=date(2026, 1, 1), data_fim=date(2026, 6, 30))
+
+    assert dashboard.agrupamento_periodo == "mes"
+    assert [venda.periodo for venda in dashboard.vendas_por_periodo] == [
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+        "2026-06",
+    ]
+    assert dashboard.vendas_por_periodo[1].receita_bruta == Decimal("50.00")
+
+
+@pytest.mark.integration
+def test_dashboard_desempenho_por_unidade(db_session):
+    """Garante o ranking de unidades com participacao na receita."""
+    unidade, produto_a, _produto_b, variacao_a, _variacao_b = _base_bi(db_session)
+    unidade_norte = _segunda_unidade(db_session)
+    momento = datetime(2026, 4, 10, 13)
+    db_session.add_all(
+        [
+            _pedido_com_itens(unidade, momento, "100.00", "100.00", [(produto_a, variacao_a, 1, "100.00")]),
+            _pedido_com_itens(unidade_norte, momento, "200.00", "200.00", [(produto_a, variacao_a, 2, "100.00")]),
+            _pedido_com_itens(unidade_norte, momento, "100.00", "100.00", [(produto_a, variacao_a, 1, "100.00")]),
+        ]
+    )
+    db_session.commit()
+
+    dashboard = repository.obter_dashboard(db_session, data_inicio=date(2026, 4, 1), data_fim=date(2026, 4, 30))
+
+    assert [unidade.nome for unidade in dashboard.desempenho_unidades] == ["Unidade Norte", "Unidade BI"]
+    assert dashboard.desempenho_unidades[0].total_pedidos == 2
+    assert dashboard.desempenho_unidades[0].receita_bruta == Decimal("300.00")
+    assert dashboard.desempenho_unidades[0].ticket_medio == Decimal("150.00")
+    assert dashboard.desempenho_unidades[0].participacao == Decimal("75.00")
+
+    filtrado = repository.obter_dashboard(
+        db_session,
+        unidade_id=unidade.id,
+        data_inicio=date(2026, 4, 1),
+        data_fim=date(2026, 4, 30),
+    )
+    assert [unidade.nome for unidade in filtrado.desempenho_unidades] == ["Unidade BI"]
+    assert filtrado.desempenho_unidades[0].participacao == Decimal("100.00")
+
+
+@pytest.mark.integration
+def test_dashboard_metricas_de_fidelidade(db_session):
+    """Garante as metricas de fidelidade a partir dos pedidos com cliente."""
+    unidade, produto_a, _produto_b, variacao_a, _variacao_b = _base_bi(db_session)
+    maria = Cliente(nome="Maria", telefone="61999990001", pontos_fidelidade=7)
+    joao = Cliente(nome="Joao", telefone="61999990002", pontos_fidelidade=2)
+    db_session.add_all([maria, joao])
+    db_session.flush()
+    momento = datetime(2026, 5, 10, 19)
+    pedidos = [
+        _pedido_com_itens(unidade, momento, "100.00", "90.00", [(produto_a, variacao_a, 1, "100.00")]),
+        _pedido_com_itens(unidade, momento, "100.00", "100.00", [(produto_a, variacao_a, 1, "100.00")]),
+        _pedido_com_itens(unidade, momento, "50.00", "50.00", [(produto_a, variacao_a, 1, "50.00")]),
+        _pedido_com_itens(unidade, momento, "30.00", "30.00", [(produto_a, variacao_a, 1, "30.00")]),
+    ]
+    pedidos[0].cliente = maria
+    pedidos[0].pontos_fidelidade_utilizados = 10
+    pedidos[1].cliente = maria
+    pedidos[2].cliente = joao
+    db_session.add_all(pedidos)
+    db_session.commit()
+
+    fidelidade = repository.obter_dashboard(
+        db_session,
+        data_inicio=date(2026, 5, 1),
+        data_fim=date(2026, 5, 31),
+    ).fidelidade
+
+    assert fidelidade.pedidos_com_cliente == 3
+    assert fidelidade.percentual_pedidos_com_cliente == Decimal("75.00")
+    assert fidelidade.clientes_unicos == 2
+    assert fidelidade.pontos_resgatados == 10
+    assert fidelidade.descontos_concedidos == Decimal("10.00")
+    assert fidelidade.ticket_medio_com_cliente == Decimal("83.33")
+    assert fidelidade.ticket_medio_sem_cliente == Decimal("30.00")
+    assert [cliente.nome for cliente in fidelidade.top_clientes] == ["Maria", "Joao"]
+    assert fidelidade.top_clientes[0].total_pedidos == 2
+    assert fidelidade.top_clientes[0].receita_bruta == Decimal("200.00")
+    assert fidelidade.top_clientes[0].pontos_atuais == 7
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"data_inicio": "2026-05-01"},
+        {"data_fim": "2026-05-01"},
+        {"data_inicio": "2026-05-10", "data_fim": "2026-05-01"},
+    ],
+)
+def test_dashboard_rejeita_intervalo_invalido(cliente, params):
+    """Garante que o intervalo precisa das duas datas em ordem."""
+    resposta = cliente.get("/bi/dashboard", params=params)
+
+    assert resposta.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("pedido_pago")
+def test_dashboard_aceita_intervalo_pela_api(cliente):
+    """Garante que a rota repassa o intervalo de datas e devolve os blocos novos."""
+    hoje = date.today().isoformat()
+
+    resposta = cliente.get("/bi/dashboard", params={"data_inicio": hoje, "data_fim": hoje})
+
+    assert resposta.status_code == 200
+    body = resposta.json()
+    assert body["kpis"]["receita_bruta"] == "60.00"
+    assert body["vendas_por_periodo"] == [{"periodo": hoje, "receita_bruta": "60.00", "total_pedidos": 1}]
+    assert body["desempenho_unidades"][0]["nome"] == "Unidade BI"
+    assert body["fidelidade"]["pedidos_com_cliente"] == 0
