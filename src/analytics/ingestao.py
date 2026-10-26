@@ -118,23 +118,31 @@ def _host_busca(host: str) -> bool:
     return any(padrao.match(host) for padrao in _HOSTS_BUSCA)
 
 
+def _canal_por_utm(utm_source: str) -> CanalAquisicao:
+    if utm_source == "instagram":
+        return CanalAquisicao.instagram
+    if utm_source == "qrcode":
+        return CanalAquisicao.qrcode
+    return CanalAquisicao.campanha_outros
+
+
+def _canal_por_referrer(referrer_host: str) -> CanalAquisicao:
+    if _host_instagram(referrer_host):
+        return CanalAquisicao.instagram
+    if _host_busca(referrer_host):
+        return CanalAquisicao.busca
+    return CanalAquisicao.outros_sites
+
+
 def calcular_canal(
     utm_source: str | None,
     referrer_host: str | None,
 ) -> CanalAquisicao:
     """Aplica a tabela de mapeamento de canal, em ordem, sobre valores ja normalizados."""
-    if utm_source == "instagram":
-        return CanalAquisicao.instagram
-    if utm_source == "qrcode":
-        return CanalAquisicao.qrcode
     if utm_source:
-        return CanalAquisicao.campanha_outros
+        return _canal_por_utm(utm_source)
     if referrer_host:
-        if _host_instagram(referrer_host):
-            return CanalAquisicao.instagram
-        if _host_busca(referrer_host):
-            return CanalAquisicao.busca
-        return CanalAquisicao.outros_sites
+        return _canal_por_referrer(referrer_host)
     return CanalAquisicao.direto
 
 
