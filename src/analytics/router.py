@@ -1,13 +1,14 @@
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from src.analytics import ingestao, repository
-from src.analytics.schema import EventoAnalyticsCreate
+from src.analytics.model import CanalAquisicao
+from src.analytics.schema import AquisicaoRead, EventoAnalyticsCreate, PeriodoAquisicao
 from src.database import get_db
 
 # Ingestao publica: registrada sem auth_dependencies e sem ler o token.
@@ -75,3 +76,20 @@ async def registrar_evento(
     data = await _ler_payload(request)
     await run_in_threadpool(repository.registrar_evento, db, data)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/aquisicao", response_model=AquisicaoRead)
+def obter_aquisicao(
+    *,
+    periodo: PeriodoAquisicao = Query(PeriodoAquisicao.ultimos_30_dias),
+    unidade_id: int | None = Query(None, gt=0),
+    canal: CanalAquisicao | None = Query(None),
+    db: Session = Depends(get_db),
+) -> AquisicaoRead:
+    """Retorna o funil e os indicadores de aquisicao. Requer autenticacao."""
+    return repository.obter_aquisicao(
+        db,
+        periodo=periodo,
+        unidade_id=unidade_id,
+        canal=canal,
+    )

@@ -1,11 +1,57 @@
-from sqlalchemy import select
+import logging
+from datetime import UTC, datetime, time, timedelta, timezone, tzinfo
+from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.analytics import ingestao
-from src.analytics.model import VERSAO_COLETA_ATUAL, EventoAnalytics
-from src.analytics.schema import EventoAnalyticsCreate
+from src.analytics.model import (
+    VERSAO_COLETA_ATUAL,
+    CanalAquisicao,
+    EventoAnalytics,
+    TipoEventoAnalytics,
+)
+from src.analytics.schema import (
+    AquisicaoRead,
+    EventoAnalyticsCreate,
+    FunilEtapaRead,
+    IndicadoresAquisicaoRead,
+    PeriodoAquisicao,
+)
 from src.produtos.model import Produto
 from src.unidades.model import Unidade
+
+logger = logging.getLogger(__name__)
+
+ETAPAS_FUNIL = (
+    TipoEventoAnalytics.visita_site,
+    TipoEventoAnalytics.abertura_cardapio,
+    TipoEventoAnalytics.selecao_unidade,
+    TipoEventoAnalytics.visualizacao_produto,
+    TipoEventoAnalytics.clique_pedir,
+)
+
+DIAS_POR_PERIODO = {
+    PeriodoAquisicao.ultimos_7_dias: 7,
+    PeriodoAquisicao.ultimos_30_dias: 30,
+    PeriodoAquisicao.ultimos_90_dias: 90,
+}
+
+
+def _fuso_sao_paulo() -> tzinfo:
+    """Fuso de Brasilia; sem base de fusos no sistema, usa UTC-3 fixo (sem horario de verao desde 2019)."""
+    try:
+        return ZoneInfo("America/Sao_Paulo")
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "analytics: base de fusos indisponivel, usando UTC-3 fixo para America/Sao_Paulo"
+        )
+        return timezone(timedelta(hours=-3), "America/Sao_Paulo")
+
+
+FUSO_SAO_PAULO = _fuso_sao_paulo()
 
 
 def _id_existente(db: Session, modelo, valor: int | None, campo: str) -> int | None:
@@ -39,3 +85,135 @@ def registrar_evento(db: Session, data: EventoAnalyticsCreate) -> EventoAnalytic
     db.add(evento)
     db.commit()
     return evento
+
+
+def intervalo_periodo(
+    periodo: PeriodoAquisicao,
+    agora: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Limites [inicio, fim) em UTC sem fuso, calculados por dia de Brasilia.
+
+    "Ultimos N dias" inclui o dia atual: comeca a meia-noite de N-1 dias
+    atras e termina a meia-noite de amanha, no horario de Brasilia.
+    """
+    momento = agora or datetime.now(UTC)
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=UTC)
+    hoje = momento.astimezone(FUSO_SAO_PAULO).date()
+
+    inicio_local = datetime.combine(
+        hoje - timedelta(days=DIAS_POR_PERIODO[periodo] - 1), time.min, FUSO_SAO_PAULO
+    )
+    fim_local = datetime.combine(hoje + timedelta(days=1), time.min, FUSO_SAO_PAULO)
+
+    def _utc(valor: datetime) -> datetime:
+        return valor.astimezone(UTC).replace(tzinfo=None)
+
+    return _utc(inicio_local), _utc(fim_local)
+
+
+def _percentual(parte: int, total: int) -> Decimal | None:
+    if total == 0:
+        return None
+    return (Decimal(parte) * Decimal("100") / Decimal(total)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+
+def _contagens_por_tipo(
+    db: Session,
+    inicio: datetime,
+    fim: datetime,
+    unidade_id: int | None,
+    canal: CanalAquisicao | None,
+) -> dict[TipoEventoAnalytics, tuple[int, int]]:
+    """Retorna, por tipo, (total de eventos, eventos com primeiro_na_visita)."""
+    consulta = (
+        select(
+            EventoAnalytics.tipo,
+            func.count(),  # pylint: disable=not-callable
+            func.count().filter(EventoAnalytics.primeiro_na_visita.is_(True)),  # pylint: disable=not-callable
+        )
+        .where(EventoAnalytics.ocorrido_em >= inicio, EventoAnalytics.ocorrido_em < fim)
+        .group_by(EventoAnalytics.tipo)
+    )
+    if unidade_id is not None:
+        consulta = consulta.where(EventoAnalytics.unidade_id == unidade_id)
+    if canal is not None:
+        consulta = consulta.where(EventoAnalytics.canal == canal)
+
+    return {tipo: (total, primeiros) for tipo, total, primeiros in db.execute(consulta)}
+
+
+def _montar_funil(volumes: list[int]) -> list[FunilEtapaRead]:
+    etapas: list[FunilEtapaRead] = []
+    maior_perda_relativa = Decimal("0")
+    indice_maior_abandono: int | None = None
+
+    for indice, (etapa, volume) in enumerate(zip(ETAPAS_FUNIL, volumes)):
+        if indice == 0:
+            etapas.append(
+                FunilEtapaRead(
+                    etapa=etapa,
+                    volume=volume,
+                    conversao_etapa_anterior=None,
+                    perda=0,
+                    maior_abandono=False,
+                )
+            )
+            continue
+
+        anterior = volumes[indice - 1]
+        perda = anterior - volume
+        if perda > 0:
+            perda_relativa = Decimal(perda) / Decimal(anterior)
+            if perda_relativa > maior_perda_relativa:
+                maior_perda_relativa = perda_relativa
+                indice_maior_abandono = indice
+
+        etapas.append(
+            FunilEtapaRead(
+                etapa=etapa,
+                volume=volume,
+                conversao_etapa_anterior=_percentual(volume, anterior),
+                perda=perda,
+                maior_abandono=False,
+            )
+        )
+
+    if indice_maior_abandono is not None:
+        etapas[indice_maior_abandono].maior_abandono = True
+    return etapas
+
+
+def obter_aquisicao(
+    db: Session,
+    *,
+    periodo: PeriodoAquisicao = PeriodoAquisicao.ultimos_30_dias,
+    unidade_id: int | None = None,
+    canal: CanalAquisicao | None = None,
+    agora: datetime | None = None,
+) -> AquisicaoRead:
+    """Agrega funil e indicadores de aquisicao em uma unica consulta SQL."""
+    inicio, fim = intervalo_periodo(periodo, agora)
+    contagens = _contagens_por_tipo(db, inicio, fim, unidade_id, canal)
+
+    def total(tipo: TipoEventoAnalytics) -> int:
+        return contagens.get(tipo, (0, 0))[0]
+
+    def primeiros(tipo: TipoEventoAnalytics) -> int:
+        return contagens.get(tipo, (0, 0))[1]
+
+    visitantes = primeiros(TipoEventoAnalytics.visita_site)
+    return AquisicaoRead(
+        funil=_montar_funil([primeiros(etapa) for etapa in ETAPAS_FUNIL]),
+        indicadores=IndicadoresAquisicaoRead(
+            visitantes=visitantes,
+            visualizacoes_cardapio=total(TipoEventoAnalytics.abertura_cardapio),
+            produtos_visualizados=total(TipoEventoAnalytics.visualizacao_produto),
+            cliques_pedir=total(TipoEventoAnalytics.clique_pedir),
+            taxa_visita_clique=_percentual(
+                primeiros(TipoEventoAnalytics.clique_pedir), visitantes
+            ),
+        ),
+    )
