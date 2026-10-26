@@ -239,9 +239,9 @@ def test_real_operator_requires_local_registration_and_permissions(db):
 
 def test_unknown_event_and_snapshot_merchant_check(db):
     order, api = imported(db)
-    save_events(db, [event("HANDSHAKE_DISPUTE", "dispute")])
-    process_event(db, db.get(IfoodEvent, "dispute"), api)
-    assert "HANDSHAKE_DISPUTE" in order_dict(db, order)["alerts"][0]
+    save_events(db, [event("DELIVERY_ADDRESS_CHANGE_REQUESTED", "address")])
+    process_event(db, db.get(IfoodEvent, "address"), api)
+    assert "DELIVERY_ADDRESS_CHANGE_REQUESTED" in order_dict(db, order)["alerts"][0]
     assert order_dict(db, order)["confirmation_deadline"] is not None
     payload = event("PLACED", "another")
     payload["orderId"] = "different-order"
@@ -502,3 +502,157 @@ def test_local_details_and_search_enforce_unit_scope(db, central_http):
     actor.update(admin=False, unit=2, perms={"cozinha"})
     assert http.get(path).status_code == 403
     assert http.get("/pedidos/centralizados", params={"busca": "reservada"}).json()["total"] == 0
+
+
+def dispute_event(event_id="dispute", expires_in=timedelta(minutes=5), **metadata):
+    payload = event("HANDSHAKE_DISPUTE", event_id)
+    payload["metadata"] = {"disputeId": "dispute-1", "handshakeType": "AFTER_DELIVERY", "action": "CANCELLATION",
+                           "expiresAt": (now() + expires_in).isoformat(), "timeoutAction": "REJECT_CANCELLATION",
+                           "alternatives": [
+                               {"id": "alt-refund", "type": "REFUND",
+                                "metadata": {"maxAmount": {"currency": "BRL", "value": "20.00"}}},
+                               {"id": "alt-time", "type": "ADDITIONAL_TIME",
+                                "metadata": {"allowedsAdditionalTimeInMinutes": [10, 20],
+                                             "allowedsAdditionalTimeReasons": ["HIGH_STORE_DEMAND"]}}],
+                           **metadata}
+    return payload
+
+
+def settlement(event_id="settled", status="ACCEPTED"):
+    payload = event("HANDSHAKE_SETTLEMENT", event_id)
+    payload["metadata"] = {"disputeId": "dispute-1", "status": status}
+    return payload
+
+
+def disputed(db):
+    order, api = imported(db)
+    save_events(db, [dispute_event()])
+    process_event(db, db.get(IfoodEvent, "dispute"), api)
+    return order, api
+
+
+def test_dispute_is_exposed_with_deadline_and_alternatives(db):
+    order, _ = disputed(db)
+    data = order_dict(db, order)
+    assert data["dispute"]["id"] == "dispute-1"
+    assert len(data["dispute"]["alternatives"]) == 2
+    assert not any("Gestor" in alert for alert in data["alerts"])
+    assert any("Negociação" in alert for alert in data["alerts"])
+
+
+def test_dispute_closed_by_settlement_or_expiration(db):
+    order, api = disputed(db)
+    save_events(db, [settlement()])
+    process_event(db, db.get(IfoodEvent, "settled"), api)
+    assert order_dict(db, order)["dispute"] is None
+    save_events(db, [dispute_event("old", expires_in=-timedelta(seconds=1), disputeId="dispute-2")])
+    process_event(db, db.get(IfoodEvent, "old"), api)
+    assert order_dict(db, order)["dispute"] is None
+
+
+def test_dispute_reply_ignores_order_lock_and_settles_by_event(db):
+    order, api = disputed(db)
+    blocking = enqueue(db, order.id, "confirm", "unrelated", {})
+    blocking.state = "indeterminate"
+    db.commit()
+    payload = {"disputeId": "dispute-1", "path": "reject", "body": {"reason": "Pedido entregue"}}
+    command = enqueue(db, order.id, "disputeReject", "reply", payload)
+    with pytest.raises(HTTPException):
+        enqueue(db, order.id, "disputeAccept", "second-reply", {**payload, "path": "accept", "body": None})
+    send_commands(db, api)
+    api.dispute.assert_called_once_with("dispute-1", "reject", {"reason": "Pedido entregue"})
+    assert command.state == "pending"
+    assert order_dict(db, order)["dispute"]["pending"]["id"] == command.id
+    save_events(db, [settlement(status="REJECTED")])
+    process_event(db, db.get(IfoodEvent, "settled"), api)
+    assert command.state == "confirmed"
+    assert blocking.state == "indeterminate"
+
+
+def test_dispute_reply_rejected_when_expired_before_sending(db, monkeypatch):
+    order, api = disputed(db)
+    command = enqueue(db, order.id, "disputeAccept", "late",
+                      {"disputeId": "dispute-1", "path": "accept", "body": None})
+    monkeypatch.setattr("src.ifood.service.now", lambda: now() + timedelta(minutes=10))
+    send_commands(db, api)
+    api.dispute.assert_not_called()
+    assert command.state == "rejected"
+
+
+def test_dispute_route_validates_offered_options(db, central_http):
+    http, _actor = central_http
+    order, _ = disputed(db)
+    base = f"/integracoes/ifood/pedidos/{order.id}/disputas/dispute-1"
+    def post(action, body, key):
+        return http.post(f"{base}/{action}", json=body, headers={"Idempotency-Key": key})
+    assert post("reject", {}, "no-reason").status_code == 422
+    assert post("alternative", {"alternative_id": "alt-refund", "amount": "50.00"}, "too-much").status_code == 422
+    assert post("alternative", {"alternative_id": "alt-time", "minutes": 15,
+                                "reason": "HIGH_STORE_DEMAND"}, "bad-minutes").status_code == 422
+    assert post("alternative", {"alternative_id": "missing"}, "missing").status_code == 422
+    ok = post("alternative", {"alternative_id": "alt-refund", "amount": "12.50"}, "refund")
+    assert ok.status_code == 202
+    stored = db.get(IfoodCommand, ok.json()["id"])
+    assert stored.payload == {"disputeId": "dispute-1", "path": "alternatives/alt-refund", "body": {
+        "type": "REFUND", "metadata": {"amount": {"currency": "BRL", "value": "12.50"}}}}
+    assert post("alternative", {"alternative_id": "alt-refund", "amount": "12.50"}, "refund").json()["id"] == stored.id
+    assert http.post(f"/integracoes/ifood/pedidos/{order.id}/disputas/other/accept", json={},
+                     headers={"Idempotency-Key": "other"}).status_code == 409
+
+
+def test_pickup_code_only_for_ifood_delivery_and_validated_remotely(db, central_http, monkeypatch):
+    http, _actor = central_http
+    api = api_mock()
+    api.details.return_value["delivery"] = {"deliveredBy": "IFOOD", "pickupCode": "4321"}
+    order, _ = imported(db, api)
+    path = f"/integracoes/ifood/pedidos/{order.id}/validar-coleta"
+    assert order_dict(db, order)["pickup_code"] is None, "PLACED orders are not ready for pickup"
+    assert http.post(path, json={"code": "4321"}).status_code == 409
+    order.state = "READY_TO_PICKUP"
+    db.commit()
+    assert order_dict(db, order)["pickup_code"] == "4321"
+    calls = []
+    def validate(order_id, code):
+        calls.append((order_id, code))
+        return {"valid": code == "4321"}
+    monkeypatch.setattr(routes.client, "validate_pickup_code", validate)
+    assert http.post(path, json={"code": "4321"}).json() == {"valid": True}
+    assert http.post(path, json={"code": "0000"}).json() == {"valid": False}
+    assert http.post(path, json={"code": "12 34"}).status_code == 422
+    assert calls == [("external-1", "4321"), ("external-1", "0000")]
+    order.delivered_by = "MERCHANT"
+    db.commit()
+    assert order_dict(db, order)["pickup_code"] is None
+
+
+def test_tracking_requires_driver_and_is_rate_limited(db, central_http, monkeypatch):
+    http, _actor = central_http
+    order, api = imported(db)
+    order.delivered_by, order.state = "IFOOD", "DISPATCHED"
+    db.commit()
+    routes._tracking_cache.clear()  # pylint: disable=protected-access
+    calls = []
+    def tracking(order_id):
+        calls.append(order_id)
+        return {"latitude": -15.8, "longitude": -47.9, "deliveryEtaEnd": "2026-10-26T20:00:00Z", "extra": "x"}
+    monkeypatch.setattr(routes.client, "tracking", tracking)
+    path = f"/integracoes/ifood/pedidos/{order.id}/rastreamento"
+    assert http.get(path).json() == {"available": False}
+    assert calls == []
+    save_events(db, [event("ASSIGN_DRIVER", "driver")])
+    process_event(db, db.get(IfoodEvent, "driver"), api)
+    first = http.get(path).json()
+    assert first["available"] and first["latitude"] == -15.8 and "extra" not in first
+    assert http.get(path).json() == first
+    assert len(calls) == 1, "tracking must be requested at most once every 30 seconds"
+
+
+def test_confirmation_deadline_immediate_scheduled_and_after_confirm(db):
+    order, _ = imported(db)
+    assert utc(order_dict(db, order)["confirmation_deadline"]) == utc(order.created_at) + timedelta(minutes=8)
+    start = now() + timedelta(hours=2)
+    order.payload = {**order.payload, "orderTiming": "SCHEDULED", "preparationStartDateTime": start.isoformat()}
+    assert order_dict(db, order)["confirmation_deadline"] == start + timedelta(minutes=8)
+    assert order_dict(db, order)["scheduled"] is True
+    order.state = "CONFIRMED"
+    assert order_dict(db, order)["confirmation_deadline"] is None

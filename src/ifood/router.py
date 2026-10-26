@@ -1,4 +1,7 @@
 """Consultas unificadas e comandos autenticados do ambiente de testes."""
+import threading
+import time
+from decimal import Decimal
 from typing import Literal
 
 import requests
@@ -12,7 +15,8 @@ from src.config import settings
 from src.database import get_db
 from src.ifood.client import IfoodError, client
 from src.ifood.model import IfoodCommand, IfoodEvent, IfoodHealth, IfoodOrder
-from src.ifood.service import command_dict, enqueue, guard_merchant, order_dict, utc
+from src.ifood.service import (command_dict, enqueue, guard_merchant, open_dispute, order_dict, pickup_code,
+                               utc)
 from src.pedidos.model import ItemPedido, Pedido
 from src.pedidos.schema import PedidoRead
 from src.security import get_current_user
@@ -209,6 +213,128 @@ def execute(
             if data.reason not in {str(r["code"]) for r in (available or [])}:
                 raise HTTPException(422, "Motivo não disponível para este pedido")
     return command_dict(enqueue(db, order_id, action, idempotency_key, payload))
+
+
+class DisputeInput(BaseModel):
+    reason: str | None = Field(None, min_length=1, max_length=250)
+    alternative_id: str | None = Field(None, min_length=1, max_length=100)
+    amount: str | None = Field(None, pattern=r"^\d+(\.\d{1,2})?$")
+    minutes: int | None = Field(None, gt=0)
+
+
+def dispute_payload(dispute, action, data):
+    """Validate the reply against the options offered in the HANDSHAKE_DISPUTE event."""
+    nested = dispute.get("metadata") or {}
+    if action == "accept":
+        reasons = nested.get("acceptCancellationReasons") or []
+        if reasons and data.reason not in reasons:
+            raise HTTPException(422, "Selecione um motivo para aceitar")
+        return "accept", {"reason": data.reason} if reasons else None
+    if action == "reject":
+        if not data.reason:
+            raise HTTPException(422, "Informe o motivo da recusa")
+        return "reject", {"reason": data.reason}
+    alternative = next((a for a in dispute.get("alternatives") or [] if a.get("id") == data.alternative_id), None)
+    if not alternative:
+        raise HTTPException(422, "Contraproposta não oferecida nesta negociação")
+    meta = alternative.get("metadata") or {}
+    if alternative.get("type") == "REFUND":
+        limit = (meta.get("maxAmount") or {})
+        if not data.amount or Decimal(data.amount) <= 0 or Decimal(data.amount) > Decimal(str(limit.get("value", 0))):
+            raise HTTPException(422, "Valor de reembolso fora do limite permitido")
+        body = {"type": "REFUND", "metadata": {"amount": {
+            "currency": limit.get("currency", "BRL"), "value": data.amount}}}
+    elif alternative.get("type") == "ADDITIONAL_TIME":
+        if (data.minutes not in (meta.get("allowedsAdditionalTimeInMinutes") or [])
+                or data.reason not in (meta.get("allowedsAdditionalTimeReasons") or [])):
+            raise HTTPException(422, "Tempo adicional ou motivo não permitido")
+        body = {"type": "ADDITIONAL_TIME", "metadata": {
+            "additionalTimeInMinutes": data.minutes, "additionalTimeReason": data.reason}}
+    else:
+        raise HTTPException(422, "Tipo de contraproposta não suportado; responda no Gestor iFood")
+    return f"alternatives/{alternative['id']}", body
+
+
+@router.post("/integracoes/ifood/pedidos/{order_id}/disputas/{dispute_id}/{action}", status_code=202)
+def answer_dispute(
+    *, order_id: int, dispute_id: str, action: Literal["accept", "reject", "alternative"],
+    data: DisputeInput,
+    idempotency_key: str = Header(..., min_length=1, max_length=100),
+    actor=Depends(operator), db: Session = Depends(get_db),
+):
+    order = get_order(db, order_id, actor)
+    guard_merchant(order.merchant_id)
+    if not actor["admin"] and "anotar_pedidos" not in actor["perms"]:
+        raise HTTPException(403, "Sem permissão para responder negociações")
+    name = {"accept": "disputeAccept", "reject": "disputeReject", "alternative": "disputeAlternative"}[action]
+    existing = db.scalar(select(IfoodCommand).where(IfoodCommand.order_id == order_id,
+                                                    IfoodCommand.request_key == idempotency_key))
+    if existing:
+        return command_dict(existing)
+    dispute = open_dispute(db, order)
+    if not dispute or dispute["disputeId"] != dispute_id:
+        raise HTTPException(409, "Negociação encerrada ou expirada")
+    path, body = dispute_payload(dispute, action, data)
+    return command_dict(enqueue(db, order_id, name, idempotency_key,
+                                {"disputeId": dispute_id, "path": path, "body": body}))
+
+
+class PickupInput(BaseModel):
+    code: str = Field(..., pattern=r"^[0-9A-Za-z]{1,20}$")
+
+
+@router.post("/integracoes/ifood/pedidos/{order_id}/validar-coleta")
+def validate_pickup(order_id: int, data: PickupInput, actor=Depends(operator), db: Session = Depends(get_db)):
+    order = get_order(db, order_id, actor)
+    guard_merchant(order.merchant_id)
+    if pickup_code(order) is None:
+        raise HTTPException(409, "Validação de coleta só se aplica a entrega iFood antes da saída do pedido")
+    try:
+        result = client.validate_pickup_code(order.external_id, data.code)
+    except IfoodError as exc:
+        if 400 <= exc.status < 500 and exc.status not in (401, 408, 429):
+            raise HTTPException(409, "O iFood não aceitou a validação; confira o código ou o Gestor iFood") from exc
+        raise HTTPException(502, "Não foi possível consultar o iFood. Tente novamente mais tarde.") from exc
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(502, "Não foi possível consultar o iFood. Tente novamente mais tarde.") from exc
+    return {"valid": bool((result or {}).get("valid"))}
+
+
+# Endpoint guide: at most one tracking request every 30 seconds per order.
+TRACKING_INTERVAL = 30
+_tracking_cache: dict[int, tuple[float, dict]] = {}
+_tracking_lock = threading.Lock()
+
+
+@router.get("/integracoes/ifood/pedidos/{order_id}/rastreamento")
+def tracking(order_id: int, actor=Depends(operator), db: Session = Depends(get_db)):
+    order = get_order(db, order_id, actor)
+    guard_merchant(order.merchant_id)
+    assigned = db.scalar(select(exists().where(
+        IfoodEvent.merchant_id == order.merchant_id, IfoodEvent.order_id == order.external_id,
+        IfoodEvent.code == "ASSIGN_DRIVER")))
+    if (order.order_type != "DELIVERY" or order.delivered_by != "IFOOD" or not assigned
+            or order.state in ("CONCLUDED", "CANCELLED")):
+        return {"available": False}
+    with _tracking_lock:
+        cached = _tracking_cache.get(order_id)
+        if cached and time.monotonic() - cached[0] < TRACKING_INTERVAL:
+            return cached[1]
+        # Reserve the slot before the network call so concurrent viewers reuse the last answer.
+        _tracking_cache[order_id] = (time.monotonic(), cached[1] if cached else {"available": False})
+    try:
+        raw = client.tracking(order.external_id) or {}
+        result = {"available": True, **{k: raw.get(k) for k in (
+            "latitude", "longitude", "expectedDelivery", "pickupEtaStart", "deliveryEtaEnd", "trackDate")}}
+    except IfoodError as exc:
+        if exc.status != 404:
+            raise HTTPException(502, "Não foi possível consultar o iFood. Tente novamente mais tarde.") from exc
+        result = {"available": False}
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(502, "Não foi possível consultar o iFood. Tente novamente mais tarde.") from exc
+    with _tracking_lock:
+        _tracking_cache[order_id] = (time.monotonic(), result)
+    return result
 
 
 @router.get("/integracoes/ifood/comandos/{command_id}")

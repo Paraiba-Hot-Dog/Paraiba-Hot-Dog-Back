@@ -26,6 +26,12 @@ EXPECTED = {"confirm": "CONFIRMED", "startPreparation": "PREPARATION_STARTED",
 ACTIVE_COMMANDS = ("queued", "sending", "pending", "indeterminate")
 TRACKING = {"ASSIGN_DRIVER", "GOING_TO_ORIGIN", "ARRIVED_AT_ORIGIN", "COLLECTED",
             "ARRIVED_AT_DESTINATION", "DELIVERY_RETURNING_TO_ORIGIN", "DELIVERY_RETURNED_TO_ORIGIN"}
+# Negotiation platform replies: POST /disputes/{disputeId}/{accept|reject|alternatives/{id}}.
+DISPUTE_ACTIONS = ("disputeAccept", "disputeReject", "disputeAlternative")
+HANDLED = {"CANCELLATION_REQUESTED", "CANCELLATION_REQUEST_FAILED", "HANDSHAKE_DISPUTE",
+           "HANDSHAKE_SETTLEMENT", "RECOMMENDED_PREPARATION_START", "ORDER_PATCHED"}
+CONFIRMATION_WINDOW = timedelta(minutes=8)
+PICKUP_STATES = ("CONFIRMED", "PREPARATION_STARTED", "READY_TO_PICKUP")
 
 
 def utc(value):
@@ -130,6 +136,15 @@ def settle_commands(db, order, event):
         # queued commands have not been sent and must still be checked before sending.
         if command.sent_at is None or utc(event.created_at) < utc(command.sent_at):
             continue
+        if command.action in DISPUTE_ACTIONS:
+            # Only the settlement of the same dispute tells whether the reply was accepted.
+            metadata = event.payload.get("metadata") or {}
+            if code == "HANDSHAKE_SETTLEMENT" and metadata.get("disputeId") == command.payload["disputeId"]:
+                expired = metadata.get("status") == "EXPIRED"
+                command.state = "rejected" if expired else "confirmed"
+                command.error = "Prazo da negociação expirou" if expired else None
+                command.updated_at = now()
+            continue
         if code == EXPECTED[command.action]:
             command.state, command.error = "confirmed", None
         elif code == "CANCELLATION_REQUEST_FAILED" and command.action == "requestCancellation":
@@ -151,6 +166,51 @@ def cancellation_pending(db, order):
     return latest is not None and latest.code == "CANCELLATION_REQUESTED"
 
 
+def open_dispute(db, order):
+    """Latest dispute still awaiting the merchant: no settlement yet and expiresAt in the future."""
+    events = list(db.scalars(select(IfoodEvent).where(
+        IfoodEvent.merchant_id == order.merchant_id, IfoodEvent.order_id == order.external_id,
+        IfoodEvent.code.in_(("HANDSHAKE_DISPUTE", "HANDSHAKE_SETTLEMENT")))
+        .order_by(IfoodEvent.created_at.desc())))
+    settled = {(e.payload.get("metadata") or {}).get("disputeId")
+               for e in events if e.code == "HANDSHAKE_SETTLEMENT"}
+    for event in events:
+        metadata = event.payload.get("metadata") or {}
+        if event.code != "HANDSHAKE_DISPUTE" or not metadata.get("disputeId"):
+            continue
+        if metadata["disputeId"] in settled or not metadata.get("expiresAt"):
+            return None
+        if utc(metadata["expiresAt"]) <= now():
+            return None
+        return metadata
+    return None
+
+
+def dispute_dict(metadata):
+    nested = metadata.get("metadata") or {}
+    return {"id": metadata["disputeId"], "type": metadata.get("handshakeType"),
+            "action": metadata.get("action"), "message": metadata.get("message"),
+            "expires_at": metadata["expiresAt"], "timeout_action": metadata.get("timeoutAction"),
+            "alternatives": metadata.get("alternatives") or [],
+            "accept_reasons": nested.get("acceptCancellationReasons") or [],
+            "evidences": nested.get("evidences") or [], "items": nested.get("garnishItems") or []}
+
+
+def confirmation_deadline(order):
+    # Fundamentals: 8 minutes from createdAt, or from preparationStartDateTime for scheduled orders.
+    if order.state != "PLACED":
+        return None
+    start = preparation_at(order) if order.payload.get("orderTiming") == "SCHEDULED" else None
+    return (start or utc(order.created_at)) + CONFIRMATION_WINDOW
+
+
+def pickup_code(order):
+    """The driver's code only matters for iFood delivery before the order leaves the store."""
+    if order.order_type != "DELIVERY" or order.delivered_by != "IFOOD" or order.state not in PICKUP_STATES:
+        return None
+    return (order.payload.get("delivery") or {}).get("pickupCode")
+
+
 def enqueue(db, order_id, action, key, payload):
     order = db.scalar(select(IfoodOrder).where(IfoodOrder.id == order_id).with_for_update())
     if not order:
@@ -163,13 +223,21 @@ def enqueue(db, order_id, action, key, payload):
         if existing.action != action or existing.payload != payload:
             raise HTTPException(409, "Chave de idempotência já usada por outra ação")
         return existing
-    active = db.scalar(select(IfoodCommand).where(IfoodCommand.order_id == order.id,
-                                                  IfoodCommand.state.in_(ACTIVE_COMMANDS)))
+    dispute = action in DISPUTE_ACTIONS
+    # A dispute reply must not wait for an unrelated order command, or the dispute expires.
+    active = [c for c in db.scalars(select(IfoodCommand).where(
+        IfoodCommand.order_id == order.id, IfoodCommand.state.in_(ACTIVE_COMMANDS)))
+        if (c.action in DISPUTE_ACTIONS) == dispute
+        and (not dispute or c.payload.get("disputeId") == payload["disputeId"])]
     if active:
         raise HTTPException(409, "Há uma operação pendente. Aguarde a reconciliação.")
-    if cancellation_pending(db, order):
+    if dispute:
+        current = open_dispute(db, order)
+        if not current or current["disputeId"] != payload["disputeId"]:
+            raise HTTPException(409, "Negociação encerrada ou expirada")
+    elif cancellation_pending(db, order):
         raise HTTPException(409, "Cancelamento solicitado no iFood; aguarde o resultado")
-    if action not in allowed_actions(order):
+    elif action not in allowed_actions(order):
         raise HTTPException(409, "Ação não permitida para o estado, modalidade ou horário do pedido")
     command = IfoodCommand(order_id=order.id, action=action, request_key=key, payload=payload)
     db.add(command)
@@ -186,19 +254,24 @@ def command_dict(command):
 def order_dict(db, order, detail=False):
     commands = list(db.scalars(select(IfoodCommand).where(IfoodCommand.order_id == order.id)
                               .order_by(IfoodCommand.id.desc())))
-    pending = next((c for c in commands if c.state in ACTIVE_COMMANDS), None)
+    active = [c for c in commands if c.state in ACTIVE_COMMANDS]
+    pending = next((c for c in active if c.action not in DISPUTE_ACTIONS), None)
     events = list(db.scalars(select(IfoodEvent).where(IfoodEvent.merchant_id == order.merchant_id,
                  IfoodEvent.order_id == order.external_id).order_by(IfoodEvent.created_at.desc())))
     alerts = []
     cancellation_requested = cancellation_pending(db, order)
     if cancellation_requested:
         alerts.append("Cancelamento solicitado no iFood; aguardando resultado")
+    dispute = open_dispute(db, order)
+    if dispute:
+        dispute = {**dispute_dict(dispute), "pending": next(
+            (command_dict(c) for c in active if c.payload.get("disputeId") == dispute["disputeId"]), None)}
+        alerts.append("Negociação aberta pelo cliente; responda antes do prazo")
     for event in events:
         if event.error:
             alerts.append(event.error)
     for event in events:
-        if event.code not in STATES and event.code not in TRACKING and event.code not in (
-                "CANCELLATION_REQUESTED", "CANCELLATION_REQUEST_FAILED"):
+        if event.code not in STATES and event.code not in TRACKING and event.code not in HANDLED:
             alerts.append(f"Evento requer conferência no Gestor iFood: {event.code}")
     result = {"id": order.id, "origem": "ifood", "unidade_id": order.unidade_id,
               "nome": f"iFood #{order.display_id}", "estado_operacional": order.state,
@@ -209,8 +282,10 @@ def order_dict(db, order, detail=False):
               "pending": command_dict(pending) if pending else None, "alerts": list(dict.fromkeys(alerts)),
               "preparation_start_at": order.payload.get("preparationStartDateTime"),
               "cancellation_requested": cancellation_requested,
-              "confirmation_deadline": order.payload.get("confirmationDeadline") or (
-                  utc(order.created_at) + timedelta(minutes=8) if order.state == "PLACED" else None)}
+              "confirmation_deadline": confirmation_deadline(order),
+              "scheduled": order.payload.get("orderTiming") == "SCHEDULED",
+              "pickup_code": pickup_code(order), "dispute": dispute,
+              "driver_assigned": any(e.code == "ASSIGN_DRIVER" for e in events)}
     if detail:
         result.update(payload=order.payload, commands=[command_dict(c) for c in commands],
                       events=[{"id": e.id, "code": e.code, "created_at": e.created_at,

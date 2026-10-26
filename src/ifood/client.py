@@ -79,5 +79,16 @@ class IfoodClient:
     def command(self, order_id, action, payload):
         return self.request("POST", f"/order/v1.0/orders/{order_id}/{action}", json=payload)
 
+    def dispute(self, dispute_id, path, body):
+        # Accept without reason is sent with an empty body, as in the negotiation guide.
+        kwargs = {"json": body} if body else {}
+        return self.request("POST", f"/order/v1.0/disputes/{dispute_id}/{path}", **kwargs)
+
+    def tracking(self, order_id):
+        return self.request("GET", f"/order/v1.0/orders/{order_id}/tracking")
+
+    def validate_pickup_code(self, order_id, code):
+        return self.request("POST", f"/order/v1.0/orders/{order_id}/validatePickupCode", json={"code": code})
+
 
 client = IfoodClient()

@@ -11,8 +11,8 @@ from src.config import settings
 from src.database import SessionLocal, engine
 from src.ifood.client import IfoodError, client
 from src.ifood.model import IfoodCommand, IfoodEvent, IfoodHealth, IfoodOrder, now
-from src.ifood.service import (cancellation_pending, allowed_actions, guard_merchant, process_event,
-                               save_events, utc)
+from src.ifood.service import (DISPUTE_ACTIONS, cancellation_pending, allowed_actions, guard_merchant,
+                               open_dispute, process_event, save_events, utc)
 
 logger = logging.getLogger(__name__)
 LOCK_ID = 736541208
@@ -36,7 +36,14 @@ def send_commands(db, api):
             c.state, c.error = "rejected", "Vínculo merchant/unidade mudou"
             db.commit()
             continue
-        if cancellation_pending(db, order) or c.action not in allowed_actions(order):
+        dispute = c.action in DISPUTE_ACTIONS
+        if dispute:
+            current = open_dispute(db, order)
+            if not current or current["disputeId"] != c.payload["disputeId"]:
+                c.state, c.error = "rejected", "Negociação encerrada ou expirada antes do envio"
+                db.commit()
+                continue
+        elif cancellation_pending(db, order) or c.action not in allowed_actions(order):
             c.state, c.error = "rejected", "Estado ou modalidade mudou antes do envio"
             db.commit()
             continue
@@ -44,7 +51,10 @@ def send_commands(db, api):
         c.state, c.sent_at, c.updated_at = "sending", now(), now()
         db.commit()
         try:
-            api.command(order.external_id, c.action, c.payload)
+            if dispute:
+                api.dispute(c.payload["disputeId"], c.payload["path"], c.payload.get("body"))
+            else:
+                api.command(order.external_id, c.action, c.payload)
             c.state, c.error = "pending", None
         except IfoodError as exc:
             c.state = "rejected" if 400 <= exc.status < 500 and exc.status not in (408, 429) else "indeterminate"
