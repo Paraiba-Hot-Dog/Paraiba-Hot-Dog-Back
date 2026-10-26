@@ -15,6 +15,8 @@ from src.analytics.model import (
 )
 from src.analytics.schema import (
     AquisicaoRead,
+    EscopoAquisicao,
+    EscoposIndicadoresRead,
     EventoAnalyticsCreate,
     FunilEtapaRead,
     IndicadoresAquisicaoRead,
@@ -31,6 +33,12 @@ ETAPAS_FUNIL = (
     TipoEventoAnalytics.selecao_unidade,
     TipoEventoAnalytics.visualizacao_produto,
     TipoEventoAnalytics.clique_pedir,
+)
+
+# Etapas que acontecem antes de a visita escolher unidade. Com filtro de
+# unidade, contam o site inteiro.
+ETAPAS_SEM_UNIDADE = frozenset(
+    {TipoEventoAnalytics.visita_site, TipoEventoAnalytics.abertura_cardapio}
 )
 
 DIAS_POR_PERIODO = {
@@ -145,18 +153,43 @@ def _contagens_por_tipo(
     return {tipo: (total, primeiros) for tipo, total, primeiros in db.execute(consulta)}
 
 
-def _montar_funil(volumes: list[int]) -> list[FunilEtapaRead]:
+def _escopo_da_etapa(tipo: TipoEventoAnalytics, unidade_id: int | None) -> EscopoAquisicao:
+    if unidade_id is None or tipo in ETAPAS_SEM_UNIDADE:
+        return EscopoAquisicao.site
+    return EscopoAquisicao.unidade
+
+
+def _escopo_conversao(
+    escopo_anterior: EscopoAquisicao,
+    escopo_atual: EscopoAquisicao,
+) -> EscopoAquisicao:
+    if escopo_anterior == escopo_atual:
+        return escopo_atual
+    return EscopoAquisicao.unidade_sobre_site
+
+
+def _montar_funil(
+    volumes: list[int],
+    escopos: list[EscopoAquisicao],
+) -> list[FunilEtapaRead]:
+    """Monta as etapas com conversao, perda e maior abandono.
+
+    A passagem do site para a unidade (escopo misto) nao concorre a maior
+    abandono, porque a perda inclui quem escolheu outra unidade.
+    """
     etapas: list[FunilEtapaRead] = []
     maior_perda_relativa = Decimal("0")
     indice_maior_abandono: int | None = None
 
-    for indice, (etapa, volume) in enumerate(zip(ETAPAS_FUNIL, volumes)):
+    for indice, (etapa, volume, escopo) in enumerate(zip(ETAPAS_FUNIL, volumes, escopos)):
         if indice == 0:
             etapas.append(
                 FunilEtapaRead(
                     etapa=etapa,
                     volume=volume,
+                    escopo=escopo,
                     conversao_etapa_anterior=None,
+                    escopo_conversao=None,
                     perda=0,
                     maior_abandono=False,
                 )
@@ -165,7 +198,8 @@ def _montar_funil(volumes: list[int]) -> list[FunilEtapaRead]:
 
         anterior = volumes[indice - 1]
         perda = anterior - volume
-        if perda > 0:
+        escopo_conversao = _escopo_conversao(escopos[indice - 1], escopo)
+        if perda > 0 and escopo_conversao != EscopoAquisicao.unidade_sobre_site:
             perda_relativa = Decimal(perda) / Decimal(anterior)
             if perda_relativa > maior_perda_relativa:
                 maior_perda_relativa = perda_relativa
@@ -175,7 +209,9 @@ def _montar_funil(volumes: list[int]) -> list[FunilEtapaRead]:
             FunilEtapaRead(
                 etapa=etapa,
                 volume=volume,
+                escopo=escopo,
                 conversao_etapa_anterior=_percentual(volume, anterior),
+                escopo_conversao=escopo_conversao,
                 perda=perda,
                 maior_abandono=False,
             )
@@ -194,26 +230,48 @@ def obter_aquisicao(
     canal: CanalAquisicao | None = None,
     agora: datetime | None = None,
 ) -> AquisicaoRead:
-    """Agrega funil e indicadores de aquisicao em uma unica consulta SQL."""
+    """Agrega funil e indicadores de aquisicao em consultas SQL agregadas.
+
+    Com filtro de unidade, as etapas anteriores a escolha da unidade
+    (ETAPAS_SEM_UNIDADE) contam o site inteiro, porque esses eventos
+    acontecem antes de a visita ter unidade. As demais contam so a unidade.
+    Cada numero informa o seu escopo.
+    """
     inicio, fim = intervalo_periodo(periodo, agora)
-    contagens = _contagens_por_tipo(db, inicio, fim, unidade_id, canal)
+    contagens_unidade = _contagens_por_tipo(db, inicio, fim, unidade_id, canal)
+    contagens_site = (
+        contagens_unidade
+        if unidade_id is None
+        else _contagens_por_tipo(db, inicio, fim, None, canal)
+    )
+    escopos = {tipo: _escopo_da_etapa(tipo, unidade_id) for tipo in ETAPAS_FUNIL}
+    contagens = {
+        tipo: (contagens_site if escopos[tipo] == EscopoAquisicao.site else contagens_unidade).get(
+            tipo, (0, 0)
+        )
+        for tipo in ETAPAS_FUNIL
+    }
 
-    def total(tipo: TipoEventoAnalytics) -> int:
-        return contagens.get(tipo, (0, 0))[0]
-
-    def primeiros(tipo: TipoEventoAnalytics) -> int:
-        return contagens.get(tipo, (0, 0))[1]
-
-    visitantes = primeiros(TipoEventoAnalytics.visita_site)
+    visita = TipoEventoAnalytics.visita_site
+    clique = TipoEventoAnalytics.clique_pedir
+    visitantes = contagens[visita][1]
     return AquisicaoRead(
-        funil=_montar_funil([primeiros(etapa) for etapa in ETAPAS_FUNIL]),
+        funil=_montar_funil(
+            [contagens[etapa][1] for etapa in ETAPAS_FUNIL],
+            [escopos[etapa] for etapa in ETAPAS_FUNIL],
+        ),
         indicadores=IndicadoresAquisicaoRead(
             visitantes=visitantes,
-            visualizacoes_cardapio=total(TipoEventoAnalytics.abertura_cardapio),
-            produtos_visualizados=total(TipoEventoAnalytics.visualizacao_produto),
-            cliques_pedir=total(TipoEventoAnalytics.clique_pedir),
-            taxa_visita_clique=_percentual(
-                primeiros(TipoEventoAnalytics.clique_pedir), visitantes
+            visualizacoes_cardapio=contagens[TipoEventoAnalytics.abertura_cardapio][0],
+            produtos_visualizados=contagens[TipoEventoAnalytics.visualizacao_produto][0],
+            cliques_pedir=contagens[clique][0],
+            taxa_visita_clique=_percentual(contagens[clique][1], visitantes),
+            escopos=EscoposIndicadoresRead(
+                visitantes=escopos[visita],
+                visualizacoes_cardapio=escopos[TipoEventoAnalytics.abertura_cardapio],
+                produtos_visualizados=escopos[TipoEventoAnalytics.visualizacao_produto],
+                cliques_pedir=escopos[clique],
+                taxa_visita_clique=_escopo_conversao(escopos[visita], escopos[clique]),
             ),
         ),
     )

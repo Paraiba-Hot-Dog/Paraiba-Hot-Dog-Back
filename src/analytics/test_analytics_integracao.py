@@ -14,7 +14,7 @@ from src.analytics.model import (
     EventoAnalytics,
     TipoEventoAnalytics,
 )
-from src.analytics.schema import PeriodoAquisicao
+from src.analytics.schema import EscopoAquisicao, PeriodoAquisicao
 from src.database import Base, get_db
 from src.main import app
 from src.produtos.model import Categoria, Produto, Subcategoria
@@ -532,7 +532,7 @@ def test_funil_conta_so_primeiro_na_visita_e_indicadores_contam_total(db_session
 
     assert [etapa.etapa for etapa in resultado.funil] == list(repository.ETAPAS_FUNIL)
     assert [etapa.volume for etapa in resultado.funil] == [10, 8, 6, 5, 2]
-    assert resultado.indicadores.model_dump() == {
+    assert resultado.indicadores.model_dump(exclude={"escopos"}) == {
         "visitantes": 10,
         "visualizacoes_cardapio": 10,
         "produtos_visualizados": 12,
@@ -627,12 +627,20 @@ def test_aquisicao_sem_resultados(cliente):
         assert etapa["conversao_etapa_anterior"] is None
         assert etapa["perda"] == 0
         assert etapa["maior_abandono"] is False
+        assert etapa["escopo"] == "site"
     assert corpo["indicadores"] == {
         "visitantes": 0,
         "visualizacoes_cardapio": 0,
         "produtos_visualizados": 0,
         "cliques_pedir": 0,
         "taxa_visita_clique": None,
+        "escopos": {
+            "visitantes": "site",
+            "visualizacoes_cardapio": "site",
+            "produtos_visualizados": "site",
+            "cliques_pedir": "site",
+            "taxa_visita_clique": "site",
+        },
     }
 
 
@@ -689,3 +697,113 @@ def test_aquisicao_exige_autenticacao(cliente):
     resposta = cliente.get("/analytics/aquisicao")
 
     assert resposta.status_code == 401
+
+
+# ------------------------------------------------- escopo com filtro de unidade
+
+
+def _popular_exemplo_unidades(db_session, centro_id: int, outra_id: int):
+    """100 visitas e 60 aberturas sem unidade; 25 escolhem a Centro e 15 a outra."""
+    tipos = TipoEventoAnalytics
+    _criar_eventos(db_session, tipos.visita_site, 100)
+    _criar_eventos(db_session, tipos.abertura_cardapio, 60)
+    _criar_eventos(db_session, tipos.selecao_unidade, 25, unidade_id=centro_id)
+    _criar_eventos(db_session, tipos.selecao_unidade, 15, unidade_id=outra_id)
+    _criar_eventos(db_session, tipos.visualizacao_produto, 12, unidade_id=centro_id)
+    _criar_eventos(db_session, tipos.visualizacao_produto, 3, primeiro=False, unidade_id=centro_id)
+    _criar_eventos(db_session, tipos.visualizacao_produto, 9, unidade_id=outra_id)
+    _criar_eventos(db_session, tipos.clique_pedir, 6, unidade_id=centro_id)
+    _criar_eventos(db_session, tipos.clique_pedir, 4, unidade_id=outra_id)
+
+
+@pytest.fixture(name="outra_unidade")
+def fixture_outra_unidade(db_session, unidade):
+    """Segunda unidade, para comparar escopos."""
+    outra = Unidade(
+        nome="Unidade Outra",
+        abertura=time(16, 30),
+        fechamento=time(23, 59),
+        descricao="Outra unidade",
+        endereco=unidade.endereco,
+    )
+    db_session.add(outra)
+    db_session.commit()
+    return outra
+
+
+def test_filtro_de_unidade_conta_site_inteiro_antes_da_escolha(
+    db_session, unidade, outra_unidade
+):
+    """Com unidade, visita e cardapio contam o site; as demais etapas, so a unidade."""
+    _popular_exemplo_unidades(db_session, unidade.id, outra_unidade.id)
+
+    resultado = repository.obter_aquisicao(db_session, unidade_id=unidade.id, agora=AGORA)
+    etapas = _etapas(resultado)
+    tipos = TipoEventoAnalytics
+    site, so_unidade, misto = (
+        EscopoAquisicao.site,
+        EscopoAquisicao.unidade,
+        EscopoAquisicao.unidade_sobre_site,
+    )
+
+    assert [etapa.volume for etapa in resultado.funil] == [100, 60, 25, 12, 6]
+    assert [etapa.escopo for etapa in resultado.funil] == [site, site, so_unidade, so_unidade, so_unidade]
+    assert [etapa.escopo_conversao for etapa in resultado.funil] == [None, site, misto, so_unidade, so_unidade]
+    assert str(etapas[tipos.selecao_unidade].conversao_etapa_anterior) == "41.67"
+    assert str(etapas[tipos.clique_pedir].conversao_etapa_anterior) == "50.00"
+
+    indicadores = resultado.indicadores
+    assert (indicadores.visitantes, indicadores.visualizacoes_cardapio) == (100, 60)
+    assert (indicadores.produtos_visualizados, indicadores.cliques_pedir) == (15, 6)
+    assert str(indicadores.taxa_visita_clique) == "6.00"
+    assert indicadores.escopos.model_dump() == {
+        "visitantes": site,
+        "visualizacoes_cardapio": site,
+        "produtos_visualizados": so_unidade,
+        "cliques_pedir": so_unidade,
+        "taxa_visita_clique": misto,
+    }
+
+
+def test_passagem_do_site_para_a_unidade_nao_e_maior_abandono(
+    db_session, unidade, outra_unidade
+):
+    """A perda de 60 para 25 inclui quem escolheu outra unidade, entao nao e abandono."""
+    _popular_exemplo_unidades(db_session, unidade.id, outra_unidade.id)
+
+    etapas = _etapas(repository.obter_aquisicao(db_session, unidade_id=unidade.id, agora=AGORA))
+    tipos = TipoEventoAnalytics
+
+    assert etapas[tipos.selecao_unidade].perda == 35
+    assert etapas[tipos.selecao_unidade].maior_abandono is False
+    assert [etapa for etapa, dados in etapas.items() if dados.maior_abandono] == [
+        tipos.visualizacao_produto
+    ]
+
+
+def test_sem_filtro_de_unidade_tudo_e_site(db_session, unidade, outra_unidade):
+    """Sem unidade, todas as etapas, conversoes e indicadores tem escopo site."""
+    _popular_exemplo_unidades(db_session, unidade.id, outra_unidade.id)
+
+    resultado = repository.obter_aquisicao(db_session, agora=AGORA)
+
+    assert [etapa.volume for etapa in resultado.funil] == [100, 60, 40, 21, 10]
+    assert {etapa.escopo for etapa in resultado.funil} == {EscopoAquisicao.site}
+    assert {etapa.escopo_conversao for etapa in resultado.funil[1:]} == {EscopoAquisicao.site}
+    assert set(resultado.indicadores.escopos.model_dump().values()) == {EscopoAquisicao.site}
+
+
+def test_filtro_de_unidade_respeita_canal_no_site_inteiro(db_session, unidade):
+    """Com unidade e canal, as etapas do site inteiro tambem filtram o canal."""
+    tipos = TipoEventoAnalytics
+    _criar_eventos(db_session, tipos.visita_site, 7, canal=CanalAquisicao.instagram)
+    _criar_eventos(db_session, tipos.visita_site, 5, canal=CanalAquisicao.qrcode)
+    _criar_eventos(db_session, tipos.clique_pedir, 2, canal=CanalAquisicao.instagram, unidade_id=unidade.id)
+
+    resultado = repository.obter_aquisicao(
+        db_session, unidade_id=unidade.id, canal=CanalAquisicao.instagram, agora=AGORA
+    )
+
+    assert resultado.indicadores.visitantes == 7
+    assert resultado.indicadores.cliques_pedir == 2
+    assert str(resultado.indicadores.taxa_visita_clique) == "28.57"
