@@ -19,8 +19,9 @@ from src.database import Base, get_db
 from src.ifood.client import IfoodClient, IfoodError
 from src.ifood.model import IfoodCommand, IfoodEvent, IfoodItem, IfoodOrder, now
 from src.ifood.router import operator
-from src.ifood.service import allowed_actions, enqueue, process_event, save_events, order_dict
+from src.ifood.service import allowed_actions, enqueue, process_event, save_events, order_dict, utc
 from src.ifood.worker import cycle, send_commands
+from src.ifood import worker
 from src.ifood import router as routes
 from src.permissoes.model import Permissao, TipoPermissao
 from src.usuarios.model import Usuario, FuncaoUsuario
@@ -257,8 +258,12 @@ def test_ifood_delivery_updates_from_events_and_failed_details_retry(db):
     api.polling.return_value = [event("READY_TO_PICKUP", "ready")]
     api.details.side_effect = requests.Timeout()
     cycle(db, api)
-    assert not db.get(IfoodEvent, "ready").processed
-    assert db.get(IfoodEvent, "ready").acknowledged
+    ready = db.get(IfoodEvent, "ready")
+    assert not ready.processed
+    assert ready.acknowledged
+    assert ready.next_attempt_at is not None
+    ready.next_attempt_at = now() - timedelta(seconds=1)
+    db.commit()
     api.details.side_effect = None
     api.details.return_value["delivery"]["deliveredBy"] = "IFOOD"
     api.polling.return_value = []
@@ -268,6 +273,64 @@ def test_ifood_delivery_updates_from_events_and_failed_details_retry(db):
     api.polling.return_value = [event("DISPATCHED", "out")]
     cycle(db, api)
     assert order.state == "DISPATCHED"
+
+
+def test_details_404_retries_with_backoff_then_abandons(db, central_http, monkeypatch):
+    http, _actor = central_http
+    clock = {"at": now()}
+    monkeypatch.setattr(worker, "now", lambda: clock["at"])
+    api = api_mock()
+    api.polling.return_value = [event()]
+    api.details.side_effect = IfoodError(404)
+    cycle(db, api)
+    api.polling.return_value = []
+    failed = db.get(IfoodEvent, "event-1")
+    assert failed.attempts == 1 and not failed.processed
+    cycle(db, api)
+    assert api.details.call_count == 1, "backoff must skip the event until next_attempt_at"
+    for _ in range(40):
+        clock["at"] += timedelta(seconds=30)
+        cycle(db, api)
+    assert failed.processed and "10 minutos" in failed.error
+    # 30s, 60s, 120s, 240s, then the deadline: bounded, never one call per cycle.
+    assert api.details.call_count <= 7
+    assert db.scalar(select(IfoodOrder)) is None
+    assert http.get("/pedidos/centralizados").json()["integration"]["abandoned_events"] == 1
+
+
+def test_failing_order_does_not_block_others_or_commands(db):
+    order, api = imported(db)
+    command = enqueue(db, order.id, "confirm", "confirm-while-other-fails", {})
+    broken, healthy = event("PLACED", "broken"), event("PLACED", "healthy")
+    broken["orderId"], healthy["orderId"] = "missing-order", "another-order"
+    api.polling.return_value = [broken, healthy]
+    healthy_details = api.details.return_value
+    def details(order_id):
+        if order_id == "missing-order":
+            raise IfoodError(404)
+        return healthy_details
+    api.details.side_effect = details
+    cycle(db, api)
+    assert not db.get(IfoodEvent, "broken").processed
+    assert db.get(IfoodEvent, "healthy").processed
+    assert len(list(db.scalars(select(IfoodOrder)))) == 2
+    api.command.assert_called_once()
+    assert command.state != "queued"
+
+
+def test_rate_limited_details_stop_imports_but_send_commands(db):
+    order, api = imported(db)
+    enqueue(db, order.id, "confirm", "confirm-under-429", {})
+    first, second = event("PLACED", "first"), event("PLACED", "second")
+    first["orderId"], second["orderId"] = "order-a", "order-b"
+    api.polling.return_value = [first, second]
+    api.details.reset_mock()
+    api.details.side_effect = IfoodError(429, retry_after=120)
+    cycle(db, api)
+    assert api.details.call_count == 1
+    deferred = db.get(IfoodEvent, "first")
+    assert utc(deferred.next_attempt_at) - now() > timedelta(seconds=100)
+    api.command.assert_called_once()
 
 
 def test_rate_limited_command_waits_for_retry_cycle(db):

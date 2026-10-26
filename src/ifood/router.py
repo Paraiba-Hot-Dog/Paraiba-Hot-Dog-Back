@@ -11,7 +11,7 @@ from src.clientes.model import Cliente
 from src.config import settings
 from src.database import get_db
 from src.ifood.client import IfoodError, client
-from src.ifood.model import IfoodCommand, IfoodHealth, IfoodOrder
+from src.ifood.model import IfoodCommand, IfoodEvent, IfoodHealth, IfoodOrder
 from src.ifood.service import command_dict, enqueue, guard_merchant, order_dict, utc
 from src.pedidos.model import ItemPedido, Pedido
 from src.pedidos.schema import PedidoRead
@@ -131,10 +131,15 @@ def centralized(filters: CentralFilters = Depends(), actor=Depends(operator), db
             order = db.get(Pedido, row["id"])
             result.append(local_order_dict(order))
     health = db.get(IfoodHealth, 1)
+    abandoned = select(func.count()).where(
+        IfoodEvent.processed.is_(True), IfoodEvent.error.is_not(None),
+        IfoodEvent.merchant_id.in_([m for m, u in settings.ifood_test_merchants.items()
+                                    if unit is None or u == unit]))
     return {"items": result, "total": total, "skip": filters.skip, "limit": filters.limit,
             "integration": {"enabled": settings.ifood_enabled, "environment": "test",
                             "last_poll_at": health.last_poll_at if health else None,
-                            "error": health.error if health else None}}
+                            "error": health.error if health else None,
+                            "abandoned_events": db.scalar(abandoned)}}
 
 
 def local_order_dict(order):

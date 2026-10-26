@@ -54,7 +54,10 @@ class IfoodEvent(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     acknowledged: Mapped[bool] = mapped_column(default=False)
     processed: Mapped[bool] = mapped_column(default=False)
+    # processed with error means the retry window expired and the event was abandoned.
     error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class IfoodCommand(Base):

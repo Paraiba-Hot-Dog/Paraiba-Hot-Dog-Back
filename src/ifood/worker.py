@@ -1,18 +1,24 @@
 """Execute: python -m src.ifood.worker. Um consumidor por banco PostgreSQL."""
 import logging
 import time
+from datetime import timedelta
 
 import requests
-from sqlalchemy import select, text
+from fastapi import HTTPException
+from sqlalchemy import or_, select, text
 
 from src.config import settings
 from src.database import SessionLocal, engine
 from src.ifood.client import IfoodError, client
 from src.ifood.model import IfoodCommand, IfoodEvent, IfoodHealth, IfoodOrder, now
-from src.ifood.service import cancellation_pending, allowed_actions, guard_merchant, process_event, save_events
+from src.ifood.service import (cancellation_pending, allowed_actions, guard_merchant, process_event,
+                               save_events, utc)
 
 logger = logging.getLogger(__name__)
 LOCK_ID = 736541208
+# Order workflow guide: on 404 retry with exponential backoff for up to 10 minutes, never indefinitely.
+RETRY_WINDOW = timedelta(minutes=10)
+MAX_BACKOFF = 240
 
 
 def send_commands(db, api):
@@ -22,7 +28,11 @@ def send_commands(db, api):
     db.commit()
     for c in list(db.scalars(select(IfoodCommand).where(IfoodCommand.state == "queued").order_by(IfoodCommand.id))):
         order = db.scalar(select(IfoodOrder).where(IfoodOrder.id == c.order_id).with_for_update())
-        if guard_merchant(order.merchant_id) != order.unidade_id:
+        try:
+            unit = guard_merchant(order.merchant_id)
+        except HTTPException:
+            unit = None
+        if unit != order.unidade_id:
             c.state, c.error = "rejected", "Vínculo merchant/unidade mudou"
             db.commit()
             continue
@@ -51,6 +61,43 @@ def send_commands(db, api):
         db.commit()
 
 
+def defer_event(db, event_id, exc):
+    """Schedule the next attempt with exponential backoff or abandon after the retry window."""
+    event = db.get(IfoodEvent, event_id)
+    event.attempts += 1
+    deadline = utc(event.received_at) + RETRY_WINDOW
+    if now() >= deadline:
+        event.processed, event.next_attempt_at = True, None
+        event.error = "Detalhes indisponíveis após 10 minutos; confira o pedido no Gestor iFood"
+    else:
+        delay = min(MAX_BACKOFF, 30 * 2 ** (event.attempts - 1))
+        if getattr(exc, "status", None) == 429:
+            delay = max(delay, exc.retry_after)
+        # The last attempt happens at the deadline, so the window is fully used but never exceeded.
+        event.next_attempt_at = min(now() + timedelta(seconds=delay), deadline)
+        event.error = "Falha ao importar detalhes; nova tentativa agendada"
+    db.commit()
+
+
+def process_pending(db, api):
+    due = list(db.scalars(select(IfoodEvent).where(
+        IfoodEvent.processed.is_(False),
+        IfoodEvent.merchant_id.in_(list(settings.ifood_test_merchants)),
+        or_(IfoodEvent.next_attempt_at.is_(None), IfoodEvent.next_attempt_at <= now()))
+        .order_by(IfoodEvent.created_at, IfoodEvent.id)))
+    for event in due:
+        event_id = event.id
+        try:
+            process_event(db, event, api)
+        # One faulty order must not hold back the others nor the queued commands.
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            db.rollback()
+            logger.warning("Evento iFood %s falhou: %r", event_id, exc)
+            defer_event(db, event_id, exc)
+            if isinstance(exc, IfoodError) and exc.status == 429:
+                break
+
+
 def cycle(db, api):
     events = api.polling(list(settings.ifood_test_merchants))
     save_events(db, events)
@@ -63,19 +110,7 @@ def cycle(db, api):
         for e in batch:
             e.acknowledged = True
         db.commit()
-    for event in list(db.scalars(select(IfoodEvent).where(IfoodEvent.processed.is_(False))
-                                 .order_by(IfoodEvent.created_at, IfoodEvent.id))):
-        try:
-            process_event(db, event, api)
-        except IfoodError:
-            db.rollback()
-            raise
-        except (requests.RequestException, ValueError, KeyError, TypeError):
-            event_id = event.id
-            db.rollback()
-            failed = db.get(IfoodEvent, event_id)
-            failed.error = "Falha ao importar detalhes; nova tentativa no próximo ciclo"
-            db.commit()
+    process_pending(db, api)
     send_commands(db, api)
     health = db.get(IfoodHealth, 1)
     if health is None:
