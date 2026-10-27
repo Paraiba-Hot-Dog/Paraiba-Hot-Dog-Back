@@ -1,9 +1,9 @@
 from datetime import datetime
 from enum import Enum
 import re
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, field_validator
 
 
 class ClienteTelefoneMixin(BaseModel):
@@ -64,10 +64,30 @@ class ClienteUpdate(ClienteTelefoneMixin):
     ajuste_pontos: Optional[AjustePontos] = None
 
 
+DescricaoMotivoStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+]
+
+
+class MotivoAjustePontosCreate(BaseModel):
+    descricao: DescricaoMotivoStr
+    exige_observacao: bool = False
+
+
+class MotivoAjustePontosUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    descricao: Optional[DescricaoMotivoStr] = None
+    exige_observacao: Optional[bool] = None
+    ativo: Optional[bool] = None
+
+
 class MotivoAjustePontosRead(BaseModel):
     id: int
     descricao: str
     exige_observacao: bool
+    ativo: bool
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,6 +97,7 @@ class AjustePontosRead(BaseModel):
     cliente_id: int
     motivo: MotivoAjustePontosRead
     observacao: Optional[str]
+    quantidade: int
     pontos_anterior: int
     pontos_atual: int
     usuario_id: Optional[int]

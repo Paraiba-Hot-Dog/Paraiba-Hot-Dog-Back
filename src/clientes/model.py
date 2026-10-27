@@ -60,6 +60,11 @@ class ClienteAjustePontos(Base):
     usuario: Mapped[Usuario | None] = relationship()
 
     @property
+    def quantidade(self) -> int:
+        """Variacao do saldo no ajuste: positiva ao adicionar, negativa ao remover."""
+        return self.pontos_atual - self.pontos_anterior
+
+    @property
     def usuario_nome(self) -> str | None:
         """Nome do usuario que realizou o ajuste, se identificado."""
         return self.usuario.nome if self.usuario else None

@@ -13,10 +13,12 @@ from src.clientes.schema import (
     ClienteFiltro,
     ClienteRead,
     ClienteUpdate,
+    MotivoAjustePontosCreate,
     MotivoAjustePontosRead,
+    MotivoAjustePontosUpdate,
 )
 from src.database import get_db
-from src.security import get_current_user
+from src.security import get_current_user, require_roles
 from src.whatsapp.whatsapp_boas_vindas import enviar_boas_vindas
 
 router = APIRouter()
@@ -55,10 +57,74 @@ def listar_clientes(
 
 
 @router.get("/pontos/motivos", response_model=list[MotivoAjustePontosRead])
-def listar_motivos_ajuste(db: Session = Depends(get_db)) -> list[MotivoAjustePontosRead]:
-    """Lista os motivos predefinidos para ajuste manual de pontos."""
-    motivos = repository.listar_motivos_ajuste(db)
+def listar_motivos_ajuste(
+    apenas_ativos: bool = True,
+    db: Session = Depends(get_db),
+) -> list[MotivoAjustePontosRead]:
+    """Lista os motivos para ajuste manual de pontos; apenas_ativos=false inclui os desativados."""
+    motivos = repository.listar_motivos_ajuste(db, apenas_ativos)
     return [MotivoAjustePontosRead.model_validate(m) for m in motivos]
+
+
+@router.get("/pontos/motivos/{motivo_id}", response_model=MotivoAjustePontosRead)
+def obter_motivo_ajuste(motivo_id: int, db: Session = Depends(get_db)) -> MotivoAjustePontosRead:
+    """Retorna um motivo de ajuste de pontos pelo ID."""
+    motivo = repository.obter_motivo_ajuste(db, motivo_id)
+    if not motivo:
+        raise HTTPException(status_code=404, detail="Motivo nao encontrado")
+    return MotivoAjustePontosRead.model_validate(motivo)
+
+
+@router.post(
+    "/pontos/motivos",
+    response_model=MotivoAjustePontosRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("administrador"))],
+)
+def criar_motivo_ajuste(
+    data: MotivoAjustePontosCreate,
+    db: Session = Depends(get_db),
+) -> MotivoAjustePontosRead:
+    """Cadastra um novo motivo de ajuste de pontos. Requer role administrador."""
+    try:
+        motivo = repository.criar_motivo_ajuste(db, data)
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Motivo ja cadastrado") from e
+    return MotivoAjustePontosRead.model_validate(motivo)
+
+
+@router.patch(
+    "/pontos/motivos/{motivo_id}",
+    response_model=MotivoAjustePontosRead,
+    dependencies=[Depends(require_roles("administrador"))],
+)
+def atualizar_motivo_ajuste(
+    motivo_id: int,
+    data: MotivoAjustePontosUpdate,
+    db: Session = Depends(get_db),
+) -> MotivoAjustePontosRead:
+    """Atualiza parcialmente um motivo de ajuste de pontos. Requer role administrador."""
+    try:
+        motivo = repository.atualizar_motivo_ajuste(db, motivo_id, data)
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Motivo ja cadastrado") from e
+    if not motivo:
+        raise HTTPException(status_code=404, detail="Motivo nao encontrado")
+    return MotivoAjustePontosRead.model_validate(motivo)
+
+
+@router.delete(
+    "/pontos/motivos/{motivo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_roles("administrador"))],
+)
+def excluir_motivo_ajuste(motivo_id: int, db: Session = Depends(get_db)) -> Response:
+    """Desativa um motivo de ajuste sem afetar o historico. Requer role administrador."""
+    if not repository.excluir_motivo_ajuste(db, motivo_id):
+        raise HTTPException(status_code=404, detail="Motivo nao encontrado")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{cliente_id}", response_model=ClienteRead)
