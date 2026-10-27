@@ -5,9 +5,10 @@ from decimal import Decimal
 from typing import Literal
 
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import String, case, cast, exists, func, literal, select, union_all
+from sqlalchemy import String, and_, case, cast, exists, false, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, selectinload
 
 from src.clientes.model import Cliente
@@ -93,7 +94,9 @@ def centralized_query(filters, unit):
     ext = select(ext_search.label("search"), IfoodOrder.id.label("id"), literal("ifood").label("origem"),
                  IfoodOrder.unidade_id.label("unit"), IfoodOrder.state.label("state"),
                  IfoodOrder.created_at.label("created_at"))
-    ext = ext.where(IfoodOrder.merchant_id.in_(list(settings.ifood_test_merchants)))
+    links = [and_(IfoodOrder.merchant_id == merchant, IfoodOrder.unidade_id == unit_id)
+             for merchant, unit_id in settings.ifood_test_merchants.items()]
+    ext = ext.where(or_(*links) if links else false())
     if filters.origem == "ifood" or filters.cozinha:
         own = own.where(literal(False))
     if filters.origem == "proprio":
@@ -218,7 +221,7 @@ def execute(
 class DisputeInput(BaseModel):
     reason: str | None = Field(None, min_length=1, max_length=250)
     alternative_id: str | None = Field(None, min_length=1, max_length=100)
-    amount: str | None = Field(None, pattern=r"^\d+(\.\d{1,2})?$")
+    amount: str | None = Field(None, max_length=16, pattern=r"^\d+(\.\d{1,2})?$")
     minutes: int | None = Field(None, gt=0)
 
 
@@ -226,10 +229,10 @@ def dispute_payload(dispute, action, data):
     """Validate the reply against the options offered in the HANDSHAKE_DISPUTE event."""
     nested = dispute.get("metadata") or {}
     if action == "accept":
-        reasons = nested.get("acceptCancellationReasons") or []
-        if reasons and data.reason not in reasons:
+        accept_reasons = nested.get("acceptCancellationReasons") or []
+        if accept_reasons and data.reason not in accept_reasons:
             raise HTTPException(422, "Selecione um motivo para aceitar")
-        return "accept", {"reason": data.reason} if reasons else None
+        return "accept", {"reason": data.reason} if accept_reasons else None
     if action == "reject":
         if not data.reason:
             raise HTTPException(422, "Informe o motivo da recusa")
@@ -238,12 +241,17 @@ def dispute_payload(dispute, action, data):
     if not alternative:
         raise HTTPException(422, "Contraproposta não oferecida nesta negociação")
     meta = alternative.get("metadata") or {}
-    if alternative.get("type") == "REFUND":
+    if alternative.get("type") in ("REFUND", "BENEFIT"):
         limit = (meta.get("maxAmount") or {})
-        if not data.amount or Decimal(data.amount) <= 0 or Decimal(data.amount) > Decimal(str(limit.get("value", 0))):
-            raise HTTPException(422, "Valor de reembolso fora do limite permitido")
-        body = {"type": "REFUND", "metadata": {"amount": {
-            "currency": limit.get("currency", "BRL"), "value": data.amount}}}
+        wire_limit = str(limit.get("value", ""))
+        if not wire_limit.isascii() or not wire_limit.isdigit() or limit.get("currency", "BRL") != "BRL":
+            raise HTTPException(502, "Limite monetário inválido recebido do iFood")
+        # Local API accepts reais. Only the iFood wire format uses integer cents.
+        cents = int(Decimal(data.amount or "0") * 100)
+        if cents <= 0 or cents > int(wire_limit):
+            raise HTTPException(422, "Valor fora do limite permitido")
+        body = {"type": alternative["type"], "metadata": {"amount": {
+            "currency": "BRL", "value": str(cents)}}}
     elif alternative.get("type") == "ADDITIONAL_TIME":
         if (data.minutes not in (meta.get("allowedsAdditionalTimeInMinutes") or [])
                 or data.reason not in (meta.get("allowedsAdditionalTimeReasons") or [])):
@@ -270,6 +278,15 @@ def answer_dispute(
     existing = db.scalar(select(IfoodCommand).where(IfoodCommand.order_id == order_id,
                                                     IfoodCommand.request_key == idempotency_key))
     if existing:
+        source = next((event.payload.get("metadata") for event in db.scalars(select(IfoodEvent).where(
+            IfoodEvent.merchant_id == order.merchant_id, IfoodEvent.order_id == order.external_id,
+            IfoodEvent.code == "HANDSHAKE_DISPUTE"))
+            if (event.payload.get("metadata") or {}).get("disputeId") == dispute_id), None)
+        if not source:
+            raise HTTPException(409, "Chave de idempotência já utilizada")
+        path, body = dispute_payload(source, action, data)
+        if existing.action != name or existing.payload != {"disputeId": dispute_id, "path": path, "body": body}:
+            raise HTTPException(409, "Chave de idempotência já usada por outra resposta")
         return command_dict(existing)
     dispute = open_dispute(db, order)
     if not dispute or dispute["disputeId"] != dispute_id:
@@ -277,6 +294,34 @@ def answer_dispute(
     path, body = dispute_payload(dispute, action, data)
     return command_dict(enqueue(db, order_id, name, idempotency_key,
                                 {"disputeId": dispute_id, "path": path, "body": body}))
+
+
+@router.get("/integracoes/ifood/pedidos/{order_id}/disputas/{dispute_id}/evidencias/{index}")
+def evidence(
+    order_id: int, dispute_id: str, index: int = PathParam(..., ge=0),
+    actor=Depends(operator), db: Session = Depends(get_db),
+):
+    order = get_order(db, order_id, actor)
+    guard_merchant(order.merchant_id)
+    source = next((event.payload.get("metadata") for event in db.scalars(select(IfoodEvent).where(
+        IfoodEvent.merchant_id == order.merchant_id, IfoodEvent.order_id == order.external_id,
+        IfoodEvent.code == "HANDSHAKE_DISPUTE"))
+        if (event.payload.get("metadata") or {}).get("disputeId") == dispute_id), None)
+    files = ((source or {}).get("metadata") or {}).get("evidences") or []
+    if index >= len(files):
+        raise HTTPException(404, "Evidência não encontrada neste pedido")
+    try:
+        content, media_type = client.evidence(order.external_id, files[index].get("url", ""))
+    except IfoodError as exc:
+        if exc.status == 404:
+            raise HTTPException(404, "Evidência indisponível no iFood") from exc
+        raise HTTPException(502, "Não foi possível carregar a evidência") from exc
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(502, "Não foi possível carregar a evidência") from exc
+    return Response(content, media_type=media_type, headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": "inline",
+    })
 
 
 class PickupInput(BaseModel):

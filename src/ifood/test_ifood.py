@@ -62,6 +62,60 @@ def imported(db, api=None):
     return db.scalar(select(IfoodOrder)), api
 
 
+def test_worker_sends_command_between_polls_and_waits_for_event(db):
+    order, api = imported(db)
+    clock = Mock(return_value=0)
+    schedule = worker.WorkerSchedule(clock)
+    schedule.step(db, api)
+    command = enqueue(db, order.id, "confirm", "fast-confirm", {})
+    clock.return_value = 1
+    schedule.step(db, api)
+    api.command.assert_called_once_with(order.external_id, "confirm", {})
+    assert db.get(IfoodCommand, command.id).state == "pending"
+    assert order.state == "PLACED", "Acceptance is not confirmation of the new state"
+    for second in range(2, 30):
+        clock.return_value = second
+        schedule.step(db, api)
+    assert api.polling.call_count == 1
+    assert api.command.call_count == 1
+    clock.return_value = 30
+    api.polling.return_value = [event("CONFIRMED", "fast-confirmed")]
+    schedule.step(db, api)
+    assert api.polling.call_count == 2
+    assert order.state == "CONFIRMED"
+
+
+def test_poll_failure_does_not_delay_outgoing_commands(db):
+    order, api = imported(db)
+    api.polling.side_effect = requests.Timeout()
+    clock = Mock(return_value=0)
+    schedule = worker.WorkerSchedule(clock)
+    schedule.step(db, api)
+    enqueue(db, order.id, "confirm", "poll-offline", {})
+    clock.return_value = 1
+    schedule.step(db, api)
+    api.command.assert_called_once()
+    assert api.polling.call_count == 1
+
+
+def test_worker_respects_long_rate_limit_for_both_schedules(db):
+    order, api = imported(db)
+    enqueue(db, order.id, "confirm", "limited", {})
+    api.command.side_effect = IfoodError(429, retry_after=600)
+    clock = Mock(return_value=0)
+    schedule = worker.WorkerSchedule(clock)
+    schedule.step(db, api)
+    clock.return_value = 599
+    schedule.step(db, api)
+    api.command.assert_called_once()
+    api.polling.assert_not_called()
+    api.command.side_effect = None
+    clock.return_value = 600
+    schedule.step(db, api)
+    assert api.command.call_count == 2
+    api.polling.assert_called_once()
+
+
 def response(status=200, data=None):
     res = Mock(status_code=status, ok=status < 400, content=b"body", headers={})
     res.json.return_value = data
@@ -510,7 +564,7 @@ def dispute_event(event_id="dispute", expires_in=timedelta(minutes=5), **metadat
                            "expiresAt": (now() + expires_in).isoformat(), "timeoutAction": "REJECT_CANCELLATION",
                            "alternatives": [
                                {"id": "alt-refund", "type": "REFUND",
-                                "metadata": {"maxAmount": {"currency": "BRL", "value": "20.00"}}},
+                                "metadata": {"maxAmount": {"currency": "BRL", "value": "2000"}}},
                                {"id": "alt-time", "type": "ADDITIONAL_TIME",
                                 "metadata": {"allowedsAdditionalTimeInMinutes": [10, 20],
                                              "allowedsAdditionalTimeReasons": ["HIGH_STORE_DEMAND"]}}],
@@ -594,7 +648,7 @@ def test_dispute_route_validates_offered_options(db, central_http):
     assert ok.status_code == 202
     stored = db.get(IfoodCommand, ok.json()["id"])
     assert stored.payload == {"disputeId": "dispute-1", "path": "alternatives/alt-refund", "body": {
-        "type": "REFUND", "metadata": {"amount": {"currency": "BRL", "value": "12.50"}}}}
+        "type": "REFUND", "metadata": {"amount": {"currency": "BRL", "value": "1250"}}}}
     assert post("alternative", {"alternative_id": "alt-refund", "amount": "12.50"}, "refund").json()["id"] == stored.id
     assert http.post(f"/integracoes/ifood/pedidos/{order.id}/disputas/other/accept", json={},
                      headers={"Idempotency-Key": "other"}).status_code == 409
@@ -634,11 +688,11 @@ def test_tracking_requires_driver_and_is_rate_limited(db, central_http, monkeypa
     calls = []
     def tracking(order_id):
         calls.append(order_id)
-        return {"latitude": -15.8, "longitude": -47.9, "deliveryEtaEnd": "2026-10-26T20:00:00Z", "extra": "x"}
+        return {"latitude": -15.8, "longitude": -47.9, "deliveryEtaEnd": 600, "pickupEtaStart": 120, "extra": "x"}
     monkeypatch.setattr(routes.client, "tracking", tracking)
     path = f"/integracoes/ifood/pedidos/{order.id}/rastreamento"
     assert http.get(path).json() == {"available": False}
-    assert calls == []
+    assert not calls
     save_events(db, [event("ASSIGN_DRIVER", "driver")])
     process_event(db, db.get(IfoodEvent, "driver"), api)
     first = http.get(path).json()
@@ -656,3 +710,190 @@ def test_confirmation_deadline_immediate_scheduled_and_after_confirm(db):
     assert order_dict(db, order)["scheduled"] is True
     order.state = "CONFIRMED"
     assert order_dict(db, order)["confirmation_deadline"] is None
+
+
+
+def test_refund_converts_reais_to_integer_cents_and_enforces_real_limit():
+    offer = {"alternatives": [{"id": "refund", "type": "REFUND", "metadata": {
+        "maxAmount": {"currency": "BRL", "value": "800"}}}]}
+    data = routes.DisputeInput(alternative_id="refund", amount="2.00")
+    _path, body = routes.dispute_payload(offer, "alternative", data)
+    assert body["metadata"]["amount"] == {"currency": "BRL", "value": "200"}
+    for amount in ("0.00", "8.01", "800.00"):
+        with pytest.raises(HTTPException) as exc:
+            routes.dispute_payload(offer, "alternative", routes.DisputeInput(alternative_id="refund", amount=amount))
+        assert exc.value.status_code == 422
+    offer["alternatives"][0]["type"] = "BENEFIT"
+    assert routes.dispute_payload(offer, "alternative", data)[1]["type"] == "BENEFIT"
+    offer["alternatives"][0]["metadata"]["maxAmount"]["value"] = "8.00"
+    with pytest.raises(HTTPException) as exc:
+        routes.dispute_payload(offer, "alternative", data)
+    assert exc.value.status_code == 502
+
+
+def test_changed_dispute_reply_cannot_reuse_key(db, central_http):
+    http, _actor = central_http
+    order, _ = disputed(db)
+    base = f"/integracoes/ifood/pedidos/{order.id}/disputas/dispute-1"
+    headers = {"Idempotency-Key": "same-key"}
+    first = http.post(f"{base}/alternative", headers=headers,
+                      json={"alternative_id": "alt-refund", "amount": "2.00"})
+    assert first.status_code == 202
+    assert http.post(f"{base}/alternative", headers=headers,
+                     json={"alternative_id": "alt-refund", "amount": "3.00"}).status_code == 409
+    assert http.post(f"{base}/accept", headers=headers, json={}).status_code == 409
+
+
+def test_order_events_share_retry_counter_and_new_events_inherit_delay(db, monkeypatch):
+    clock = {"at": now()}
+    monkeypatch.setattr(worker, "now", lambda: clock["at"])
+    api = api_mock()
+    api.details.side_effect = IfoodError(404)
+    api.polling.return_value = [event("PLACED", "shared-a"), event("CONFIRMED", "shared-b")]
+    cycle(db, api)
+    assert api.details.call_count == 1
+    # An event arriving during backoff must not make another API request.
+    clock["at"] += timedelta(seconds=10)
+    api.polling.return_value = [event("READY_TO_PICKUP", "shared-c")]
+    cycle(db, api)
+    assert api.details.call_count == 1
+    records = list(db.scalars(select(IfoodEvent)))
+    assert {record.attempts for record in records} == {1}
+    assert len({utc(record.next_attempt_at) for record in records}) == 1
+    api.polling.return_value = []
+    for seconds in (20, 60, 120):
+        clock["at"] += timedelta(seconds=seconds)
+        cycle(db, api)
+    assert api.details.call_count == 4
+    assert {record.attempts for record in records} == {4}
+    # The persisted schedule remains effective with a fresh SQLAlchemy session.
+    with Session(db.get_bind()) as resumed:
+        cycle(resumed, api)
+    assert api.details.call_count == 4
+    clock["at"] += timedelta(minutes=20)
+    cycle(db, api)
+    assert api.details.call_count == 4, "expired windows must not request details again"
+    assert all(record.processed and record.error for record in records)
+
+
+def test_one_snapshot_reused_for_multiple_patch_events(db):
+    order, api = imported(db)
+    api.details.reset_mock()
+    api.polling.return_value = [event("ORDER_PATCHED", "patch-a"), event("ORDER_PATCHED", "patch-b")]
+    cycle(db, api)
+    assert api.details.call_count == 1
+    assert str(order.total) == "39.90"
+    assert db.get(IfoodEvent, "patch-a").processed
+    assert db.get(IfoodEvent, "patch-b").processed
+
+
+def test_evidence_proxy_checks_order_unit_and_dispute(db, central_http, monkeypatch):
+    http, actor = central_http
+    order, api = imported(db)
+    url = "https://merchant-api.ifood.com.br/order/v1.0/orders/external-1/cancellationEvidences/evidence-1"
+    payload = dispute_event(metadata={"evidences": [{"contentType": "image/png", "url": url}]})
+    save_events(db, [payload])
+    process_event(db, db.get(IfoodEvent, "dispute"), api)
+    download = Mock(return_value=(b"png-test", "image/png"))
+    monkeypatch.setattr(routes.client, "evidence", download)
+    path = f"/integracoes/ifood/pedidos/{order.id}/disputas/dispute-1/evidencias/0"
+    result = http.get(path)
+    assert result.status_code == 200 and result.content == b"png-test"
+    assert result.headers["content-type"] == "image/png"
+    assert result.headers["cache-control"] == "no-store"
+    download.assert_called_once_with("external-1", url)
+    assert http.get(path[:-1] + "1").status_code == 404
+    assert http.get(path.replace("dispute-1", "unrelated")).status_code == 404
+    actor.update(admin=False, unit=2, perms={"cozinha"})
+    assert http.get(path).status_code == 403
+    assert download.call_count == 1
+
+
+def test_evidence_client_sends_auth_only_to_fixed_ifood_order_path():
+    session = Mock()
+    client = IfoodClient(session, clock=lambda: 0)
+    client.token, client.expires_at = "server-only-token", 100
+    url = "https://merchant-api.ifood.com.br/order/v1.0/orders/order-1/cancellationEvidences/evidence-1"
+    result = response(data=None)
+    result.headers = {"Content-Type": "image/png"}
+    result.iter_content.return_value = [b"image-content"]
+    session.request.return_value = result
+    assert client.evidence("order-1", url) == (b"image-content", "image/png")
+    call = session.request.call_args
+    assert call.kwargs["headers"]["Authorization"] == "Bearer server-only-token"
+    assert call.kwargs["allow_redirects"] is False and call.kwargs["stream"] is True
+    for invalid in (url.replace("https://", "http://"), url.replace("merchant-api.ifood.com.br", "evil.test"),
+                    url.replace("order-1", "other-order"), url + "?redirect=evil",
+                    url.replace("evidence-1", "../token")):
+        with pytest.raises(ValueError):
+            client.evidence("order-1", invalid)
+    assert session.request.call_count == 1
+
+
+@pytest.mark.parametrize("status,media,chunks", [
+    (302, "image/png", []), (200, "text/html", []),
+    (200, "image/png", [b"x" * (10 * 1024 * 1024), b"x"]),
+])
+def test_evidence_rejects_redirect_active_content_and_oversized_media(status, media, chunks):
+    session = Mock()
+    client = IfoodClient(session, clock=lambda: 0)
+    client.token, client.expires_at = "server-token", 100
+    result = response(status=status)
+    result.headers = {"Content-Type": media}
+    result.iter_content.return_value = chunks
+    session.request.return_value = result
+    with pytest.raises(IfoodError):
+        url = "https://merchant-api.ifood.com.br/order/v1.0/orders/order-1/cancellationEvidences/e-1"
+        client.evidence("order-1", url)
+    result.close.assert_called()
+
+
+
+def test_new_event_cannot_restart_abandoned_order_retry_window(db, monkeypatch):
+    clock = {"at": now()}
+    monkeypatch.setattr(worker, "now", lambda: clock["at"])
+    api = api_mock()
+    api.details.side_effect = IfoodError(404)
+    api.polling.return_value = [event("PLACED", "first-failure")]
+    cycle(db, api)
+    clock["at"] += timedelta(minutes=11)
+    api.polling.return_value = []
+    cycle(db, api)
+    assert db.get(IfoodEvent, "first-failure").processed
+    api.polling.return_value = [event("CANCELLED", "late-event")]
+    cycle(db, api)
+    assert api.details.call_count == 1
+    assert db.get(IfoodEvent, "late-event").processed
+    assert db.get(IfoodEvent, "late-event").error
+
+
+def test_legacy_decimal_refund_is_not_sent_after_deployment(db):
+    order, api = disputed(db)
+    command = enqueue(db, order.id, "disputeAlternative", "legacy-refund", {
+        "disputeId": "dispute-1", "path": "alternatives/alt-refund", "body": {
+            "type": "REFUND", "metadata": {"amount": {"currency": "BRL", "value": "12.50"}}}})
+    send_commands(db, api)
+    api.dispute.assert_not_called()
+    assert command.state == "rejected"
+
+
+
+def test_feed_requires_current_merchant_and_unit_pair(db, central_http, monkeypatch):
+    http, actor = central_http
+    order, _api = imported(db)
+    # Remapping a merchant must not expose its stale snapshot in the old unit.
+    monkeypatch.setattr(settings, "ifood_test_merchants", {"test-store": 2})
+    for unit in (None, 1, 2):
+        params = {"origem": "ifood"}
+        if unit is not None:
+            params["unidade_id"] = unit
+        assert http.get("/pedidos/centralizados", params=params).json()["total"] == 0
+    assert http.get(f"/integracoes/ifood/pedidos/{order.id}").status_code == 403
+    order.unidade_id = 2
+    db.commit()
+    actor.update(admin=False, unit=1, perms={"cozinha"})
+    assert http.get("/pedidos/centralizados?origem=ifood").json()["total"] == 0
+    assert http.get(f"/integracoes/ifood/pedidos/{order.id}").status_code == 403
+    actor["unit"] = 2
+    assert http.get("/pedidos/centralizados?origem=ifood").json()["total"] == 1
+    assert http.get(f"/integracoes/ifood/pedidos/{order.id}").status_code == 200

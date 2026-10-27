@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import requests
 from fastapi import HTTPException
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 
 from src.config import settings
 from src.database import SessionLocal, engine
@@ -21,6 +21,34 @@ RETRY_WINDOW = timedelta(minutes=10)
 MAX_BACKOFF = 240
 
 
+def valid_dispute_money(payload):
+    body = payload.get("body") or {}
+    if body.get("type") not in ("REFUND", "BENEFIT"):
+        return True
+    money = (body.get("metadata") or {}).get("amount") or {}
+    value = money.get("value", "")
+    return (isinstance(value, str) and value.isascii() and value.isdigit()
+            and int(value) > 0 and money.get("currency") == "BRL")
+
+
+def command_error(db, order, command):
+    try:
+        unit = guard_merchant(order.merchant_id)
+    except HTTPException:
+        unit = None
+    if unit != order.unidade_id:
+        return "Vínculo merchant/unidade mudou"
+    if command.action in DISPUTE_ACTIONS:
+        if not valid_dispute_money(command.payload):
+            return "Formato monetário antigo ou inválido; envie uma nova resposta"
+        current = open_dispute(db, order)
+        if not current or current["disputeId"] != command.payload["disputeId"]:
+            return "Negociação encerrada ou expirada antes do envio"
+    elif cancellation_pending(db, order) or command.action not in allowed_actions(order):
+        return "Estado ou modalidade mudou antes do envio"
+    return None
+
+
 def send_commands(db, api):
     # Recover possible process crashes after a request left the server.
     for c in db.scalars(select(IfoodCommand).where(IfoodCommand.state == "sending")):
@@ -28,25 +56,12 @@ def send_commands(db, api):
     db.commit()
     for c in list(db.scalars(select(IfoodCommand).where(IfoodCommand.state == "queued").order_by(IfoodCommand.id))):
         order = db.scalar(select(IfoodOrder).where(IfoodOrder.id == c.order_id).with_for_update())
-        try:
-            unit = guard_merchant(order.merchant_id)
-        except HTTPException:
-            unit = None
-        if unit != order.unidade_id:
-            c.state, c.error = "rejected", "Vínculo merchant/unidade mudou"
+        error = command_error(db, order, c)
+        if error:
+            c.state, c.error = "rejected", error
             db.commit()
             continue
         dispute = c.action in DISPUTE_ACTIONS
-        if dispute:
-            current = open_dispute(db, order)
-            if not current or current["disputeId"] != c.payload["disputeId"]:
-                c.state, c.error = "rejected", "Negociação encerrada ou expirada antes do envio"
-                db.commit()
-                continue
-        elif cancellation_pending(db, order) or c.action not in allowed_actions(order):
-            c.state, c.error = "rejected", "Estado ou modalidade mudou antes do envio"
-            db.commit()
-            continue
         # Persist before network I/O: a restart must never blindly resend a mutation.
         c.state, c.sent_at, c.updated_at = "sending", now(), now()
         db.commit()
@@ -71,44 +86,95 @@ def send_commands(db, api):
         db.commit()
 
 
-def defer_event(db, event_id, exc):
-    """Schedule the next attempt with exponential backoff or abandon after the retry window."""
-    event = db.get(IfoodEvent, event_id)
-    event.attempts += 1
-    deadline = utc(event.received_at) + RETRY_WINDOW
-    if now() >= deadline:
-        event.processed, event.next_attempt_at = True, None
-        event.error = "Detalhes indisponíveis após 10 minutos; confira o pedido no Gestor iFood"
-    else:
-        delay = min(MAX_BACKOFF, 30 * 2 ** (event.attempts - 1))
-        if getattr(exc, "status", None) == 429:
-            delay = max(delay, exc.retry_after)
-        # The last attempt happens at the deadline, so the window is fully used but never exceeded.
-        event.next_attempt_at = min(now() + timedelta(seconds=delay), deadline)
-        event.error = "Falha ao importar detalhes; nova tentativa agendada"
+class CycleDetails:
+    """One current snapshot per order per cycle, shared even by ORDER_PATCHED events."""
+
+    def __init__(self, api):
+        self.api = api
+        self.cache = {}
+
+    def details(self, order_id):
+        if order_id not in self.cache:
+            self.cache[order_id] = self.api.details(order_id)
+        return self.cache[order_id]
+
+
+def defer_order(db, events, exc):
+    """All pending events of an order share one durable retry window and counter."""
+    attempts = max(event.attempts for event in events) + 1
+    deadline = min(utc(event.received_at) for event in events) + RETRY_WINDOW
+    expired = now() >= deadline
+    delay = min(MAX_BACKOFF, 30 * 2 ** min(attempts - 1, 8))
+    if getattr(exc, "status", None) == 429:
+        delay = max(delay, exc.retry_after)
+    retry_at = None if expired else min(now() + timedelta(seconds=delay), deadline)
+    for event in events:
+        event.attempts = attempts
+        event.processed = expired
+        event.next_attempt_at = retry_at
+        event.error = ("Detalhes indisponíveis após 10 minutos; confira o pedido no Gestor iFood"
+                       if expired else "Falha ao importar detalhes; nova tentativa agendada")
     db.commit()
 
 
-def process_pending(db, api):
-    due = list(db.scalars(select(IfoodEvent).where(
-        IfoodEvent.processed.is_(False),
-        IfoodEvent.merchant_id.in_(list(settings.ifood_test_merchants)),
-        or_(IfoodEvent.next_attempt_at.is_(None), IfoodEvent.next_attempt_at <= now()))
-        .order_by(IfoodEvent.created_at, IfoodEvent.id)))
-    for event in due:
+def process_order_events(db, events, api):
+    """Process one order; new events inherit the retry schedule of existing ones."""
+    first = events[0]
+    imported = db.scalar(select(IfoodOrder.id).where(
+        IfoodOrder.merchant_id == first.merchant_id, IfoodOrder.external_id == first.order_id))
+    if imported is None:
+        abandoned = db.scalar(select(IfoodEvent).where(
+            IfoodEvent.merchant_id == first.merchant_id, IfoodEvent.order_id == first.order_id,
+            IfoodEvent.processed.is_(True), IfoodEvent.error.is_not(None), IfoodEvent.attempts > 0)
+            .order_by(IfoodEvent.received_at).limit(1))
+        if abandoned:
+            for event in events:
+                event.processed, event.error = True, abandoned.error
+                event.attempts, event.next_attempt_at = abandoned.attempts, None
+            db.commit()
+            return False
+    retries = [event for event in events if event.attempts]
+    if retries:
+        deadline = min(utc(event.received_at) for event in events) + RETRY_WINDOW
+        if now() >= deadline:
+            defer_order(db, events, None)
+            return False
+        retry_at = max((utc(event.next_attempt_at) for event in retries if event.next_attempt_at), default=now())
+        if now() < retry_at:
+            attempts = max(event.attempts for event in retries)
+            for event in events:
+                event.attempts, event.next_attempt_at = attempts, retry_at
+            db.commit()
+            return False
+    for event in events:
         event_id = event.id
         try:
             process_event(db, event, api)
-        # One faulty order must not hold back the others nor the queued commands.
         except Exception as exc:  # pylint: disable=broad-exception-caught
             db.rollback()
-            logger.warning("Evento iFood %s falhou: %r", event_id, exc)
-            defer_event(db, event_id, exc)
-            if isinstance(exc, IfoodError) and exc.status == 429:
-                break
+            # Do not log exception parameters: SQL errors can contain customer snapshots.
+            logger.warning("Evento iFood %s falhou (%s)", event_id, type(exc).__name__)
+            pending = [item for item in events if not item.processed]
+            defer_order(db, pending, exc)
+            return isinstance(exc, IfoodError) and getattr(exc, "status", None) == 429
+    return False
 
 
-def cycle(db, api):
+def process_pending(db, api):
+    pending = list(db.scalars(select(IfoodEvent).where(
+        IfoodEvent.processed.is_(False),
+        IfoodEvent.merchant_id.in_(list(settings.ifood_test_merchants)))
+        .order_by(IfoodEvent.created_at, IfoodEvent.id)))
+    groups = {}
+    for event in pending:
+        groups.setdefault((event.merchant_id, event.order_id), []).append(event)
+    for events in groups.values():
+        # The order identity includes the merchant, just like the persistent snapshot.
+        if process_order_events(db, events, CycleDetails(api)):
+            break
+
+
+def cycle(db, api, *, include_commands=True):
     events = api.polling(list(settings.ifood_test_merchants))
     save_events(db, events)
     # Includes inbox records left unacknowledged by a previous process.
@@ -121,7 +187,8 @@ def cycle(db, api):
             e.acknowledged = True
         db.commit()
     process_pending(db, api)
-    send_commands(db, api)
+    if include_commands:
+        send_commands(db, api)
     health = db.get(IfoodHealth, 1)
     if health is None:
         health = IfoodHealth(id=1)
@@ -129,6 +196,45 @@ def cycle(db, api):
     health.last_poll_at, health.error = now(), None
     db.commit()
     logger.info("Ciclo iFood concluído: %s evento(s) recebido(s)", len(events))
+
+
+class WorkerSchedule:
+    """Drain commands every second without increasing the iFood polling frequency."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.next_poll = 0
+        self.next_commands = 0
+        self.poll_delay = 30
+        self.command_delay = 1
+
+    def step(self, db, api):
+        for task, interval in (("commands", 1), ("poll", 30)):
+            if self.clock() < getattr(self, f"next_{task}"):
+                continue
+            started = self.clock()
+            try:
+                if task == "commands":
+                    send_commands(db, api)
+                else:
+                    cycle(db, api, include_commands=False)
+                delay = interval
+            except (IfoodError, requests.RequestException) as exc:
+                db.rollback()
+                delay = max(min(300, getattr(self, f"{task.rstrip('s')}_delay") * 2),
+                            getattr(exc, "retry_after", 30))
+                health = db.get(IfoodHealth, 1) or IfoodHealth(id=1)
+                health.error = "Falha de comunicação com iFood; aguardando nova tentativa"
+                db.add(health)
+                db.commit()
+                logger.warning("Falha de comunicação (%s); próxima tentativa em %ss", task, delay)
+                if getattr(exc, "status", None) == 429:
+                    # Respect Retry-After across both schedules, including values over 300s.
+                    cooldown = self.clock() + delay
+                    self.next_poll = max(self.next_poll, cooldown)
+                    self.next_commands = max(self.next_commands, cooldown)
+            setattr(self, f"{task.rstrip('s')}_delay", delay)
+            setattr(self, f"next_{task}", max(getattr(self, f"next_{task}"), started + delay))
 
 
 def main():
@@ -144,25 +250,14 @@ def main():
         if not connection.scalar(text("SELECT pg_try_advisory_lock(:id)"), {"id": LOCK_ID}):
             raise SystemExit("Já existe um worker iFood neste banco")
         logger.info("Worker iFood de testes iniciado: %s merchant(s)", len(settings.ifood_test_merchants))
-        delay = 30
+        schedule = WorkerSchedule()
         try:
             while True:
-                started = time.monotonic()
-                try:
-                    # Verify the lock connection is still alive before consuming.
-                    connection.execute(text("SELECT 1"))
-                    with SessionLocal() as db:
-                        cycle(db, client)
-                    delay = 30
-                except (IfoodError, requests.RequestException) as exc:
-                    delay = min(300, max(delay * 2, getattr(exc, "retry_after", 30)))
-                    with SessionLocal() as db:
-                        health = db.get(IfoodHealth, 1) or IfoodHealth(id=1)
-                        health.error = "Falha de comunicação com iFood; aguardando nova tentativa"
-                        db.add(health)
-                        db.commit()
-                    logger.warning("Falha de comunicação; próxima tentativa em %ss", delay)
-                time.sleep(max(0, delay - (time.monotonic() - started)))
+                # Verify the lock connection is still alive before consuming.
+                connection.execute(text("SELECT 1"))
+                with SessionLocal() as db:
+                    schedule.step(db, client)
+                time.sleep(1)
         finally:
             connection.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": LOCK_ID})
 
