@@ -119,7 +119,20 @@ def _verificar_limites_envio(db: Session, usuario: Usuario, agora: datetime) -> 
     return None
 
 
+def _bloquear_no_login_local() -> None:
+    """Recuperacao de senha usa o Supabase; no login local ela fica desativada."""
+    if settings.auth_local:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Recuperacao de senha indisponivel no login local. "
+                "Use scripts/definir_senha_local.py para trocar a senha."
+            ),
+        )
+
+
 def solicitar_recuperacao_senha(db: Session, email: str) -> dict:
+    _bloquear_no_login_local()
     usuario = _buscar_usuario_por_email(db, email)
     if usuario is None:
         return _resposta(MENSAGEM_RECUPERACAO, "skipped")
@@ -172,6 +185,7 @@ def redefinir_senha(
     nova_senha: str,
     access_token: str | None = None,
 ) -> None:
+    _bloquear_no_login_local()
     if access_token:
         atualizar_senha_com_sessao(access_token, nova_senha)
         return

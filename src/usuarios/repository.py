@@ -1,14 +1,18 @@
+from uuid import uuid4
+
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.permissoes.model import Permissao
 from src.unidades.model import Unidade
+from src.auth.local_auth import gerar_hash_senha
 from src.auth.supabase_auth import (
     delete_user as supabase_delete_user,
     signup as supabase_signup,
     update_user as supabase_update_user,
 )
+from src.config import settings
 from src.usuarios.model import Usuario
 from src.usuarios.schema import UsuarioCreate, UsuarioUpdate
 
@@ -44,18 +48,27 @@ def create_usuario(db: Session, data: UsuarioCreate) -> Usuario:
     permissoes = _resolver_permissoes(db, data.permissao_ids)
     _validar_unidade(db, data.unidade_id)
 
-    # Cria usuario no Supabase Auth
-    auth_user = supabase_signup(
-        email=str(data.email),
-        password=data.senha,
-        user_metadata={"nome": data.nome, "funcao": data.funcao.value},
-    )
-    auth_user_id = auth_user.get("id")
+    if settings.auth_local:
+        # Login local: o usuario existe so no banco local, com a senha em hash bcrypt.
+        auth_user_id = None
+        db_usuario = Usuario(
+            **data.model_dump(exclude={"permissao_ids", "senha"}),
+            auth_provider_id=f"local-{uuid4()}",
+            senha=gerar_hash_senha(data.senha),
+        )
+    else:
+        # Cria usuario no Supabase Auth
+        auth_user = supabase_signup(
+            email=str(data.email),
+            password=data.senha,
+            user_metadata={"nome": data.nome, "funcao": data.funcao.value},
+        )
+        auth_user_id = auth_user.get("id")
 
-    db_usuario = Usuario(
-        **data.model_dump(exclude={"permissao_ids", "senha"}),
-        auth_provider_id=auth_user_id,
-    )
+        db_usuario = Usuario(
+            **data.model_dump(exclude={"permissao_ids", "senha"}),
+            auth_provider_id=auth_user_id,
+        )
     db_usuario.permissoes = permissoes
     db.add(db_usuario)
     try:
@@ -102,6 +115,8 @@ def update_usuario(db: Session, usuario_id: int, data: UsuarioUpdate) -> Usuario
 
     for field, value in update_data.items():
         setattr(usuario, field, value)
+    if settings.auth_local and supabase_senha:
+        usuario.senha = gerar_hash_senha(supabase_senha)
     try:
         db.commit()
     except IntegrityError as e:
@@ -110,7 +125,10 @@ def update_usuario(db: Session, usuario_id: int, data: UsuarioUpdate) -> Usuario
     db.refresh(usuario)
 
     # Sincroniza com Supabase Auth
-    supabase_update_user(usuario.auth_provider_id, email=supabase_email, password=supabase_senha)
+    if not settings.auth_local:
+        supabase_update_user(
+            usuario.auth_provider_id, email=supabase_email, password=supabase_senha
+        )
     return usuario
 
 
@@ -120,4 +138,5 @@ def delete_usuario(db: Session, usuario_id: int) -> None:
     auth_user_id = usuario.auth_provider_id
     db.delete(usuario)
     db.commit()
-    supabase_delete_user(auth_user_id)
+    if not settings.auth_local:
+        supabase_delete_user(auth_user_id)

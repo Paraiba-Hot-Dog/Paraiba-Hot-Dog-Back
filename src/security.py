@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
+from src.auth.local_auth import decode_local_token
 from src.config import settings
 from src.database import SessionLocal
 from src.usuarios.model import Usuario
@@ -98,6 +99,9 @@ def get_current_user(
 
     if credentials.scheme.lower() != "bearer":
         raise _auth_exception("Esquema de autenticacao invalido")
+
+    if settings.auth_local:
+        return decode_local_token(credentials.credentials)
 
     return decode_supabase_token(credentials.credentials)
 

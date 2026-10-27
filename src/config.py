@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_jwt_secret: str = ""
     supabase_service_role_key: str = ""
+    auth_local: bool = False
+    auth_local_jwt_secret: str = "segredo-login-local-desenvolvimento"
     frontend_base_url: str = "http://localhost:3000"
     reset_senha_token_minutos: int = 30
     reset_senha_intervalo_segundos: int = 60
