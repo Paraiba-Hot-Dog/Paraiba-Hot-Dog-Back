@@ -16,9 +16,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database import Base
 
-# Incrementar quando a regra de disparo de algum evento mudar, para explicar
-# degraus nos graficos. Registrar a mudanca no repositorio Docs.
-VERSAO_COLETA_ATUAL = 1
+# A versao da coleta vem do front (VERSAO_COLETA em src/servicos/analyticsApi.ts),
+# ao lado das regras de disparo. Limites aceitos na ingestao:
+VERSAO_COLETA_MINIMA = 1
+VERSAO_COLETA_MAXIMA = 100
 
 
 class TipoEventoAnalytics(str, Enum):

@@ -1,9 +1,13 @@
 from decimal import Decimal
 from enum import Enum
 
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
-from src.analytics.model import TipoEventoAnalytics
+from src.analytics.model import (
+    VERSAO_COLETA_MAXIMA,
+    VERSAO_COLETA_MINIMA,
+    TipoEventoAnalytics,
+)
 
 
 class EventoAnalyticsCreate(BaseModel):
@@ -16,6 +20,8 @@ class EventoAnalyticsCreate(BaseModel):
 
     tipo: TipoEventoAnalytics
     primeiro_na_visita: StrictBool
+    # Versao das regras de disparo do front que gerou o evento.
+    versao_coleta: StrictInt = Field(ge=VERSAO_COLETA_MINIMA, le=VERSAO_COLETA_MAXIMA)
     unidade_id: int | None = None
     produto_id: int | None = None
     utm_source: str | None = None

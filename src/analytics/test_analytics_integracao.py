@@ -9,7 +9,6 @@ from sqlalchemy.pool import StaticPool
 
 from src.analytics import ingestao, repository
 from src.analytics.model import (
-    VERSAO_COLETA_ATUAL,
     CanalAquisicao,
     EventoAnalytics,
     TipoEventoAnalytics,
@@ -117,7 +116,13 @@ def fixture_produto(db_session):
     return produto
 
 
-def _enviar(cliente, payload, cabecalhos=None):
+VERSAO_TESTE = 1
+
+
+def _enviar(cliente, payload, cabecalhos=None, *, com_versao=True):
+    """Envia um evento; acrescenta versao_coleta se o payload nao trouxer."""
+    if com_versao and isinstance(payload, dict):
+        payload = {"versao_coleta": VERSAO_TESTE, **payload}
     return cliente.post(
         "/analytics/eventos",
         json=payload,
@@ -147,7 +152,7 @@ def _criar_eventos(
                 canal=canal,
                 unidade_id=unidade_id,
                 ocorrido_em=ocorrido_em,
-                versao_coleta=VERSAO_COLETA_ATUAL,
+                versao_coleta=VERSAO_TESTE,
             )
         )
     db_session.commit()
@@ -190,7 +195,28 @@ def test_ingestao_grava_evento_valido(cliente, db_session, unidade, produto):
         "bio",
     )
     assert evento.referrer_host == "l.instagram.com"
-    assert evento.versao_coleta == VERSAO_COLETA_ATUAL
+    assert evento.versao_coleta == VERSAO_TESTE
+
+
+def test_ingestao_grava_a_versao_enviada_pelo_front(cliente, db_session):
+    """versao_coleta vem do payload e e gravada como recebida."""
+    _enviar(cliente, {"tipo": "visita_site", "primeiro_na_visita": True, "versao_coleta": 7})
+
+    [evento] = _eventos(db_session)
+    assert evento.versao_coleta == 7
+
+
+@pytest.mark.parametrize("versao", [None, 0, 101, -1, "2", 1.5, True])
+def test_ingestao_rejeita_versao_ausente_ou_invalida(cliente, db_session, versao):
+    """Sem versao_coleta, ou fora de 1 a 100, ou de outro tipo, responde 422."""
+    payload = {"tipo": "visita_site", "primeiro_na_visita": True}
+    if versao is not None:
+        payload["versao_coleta"] = versao
+
+    resposta = _enviar(cliente, payload, com_versao=False)
+
+    assert resposta.status_code == 422
+    assert not _eventos(db_session)
 
 
 @pytest.mark.parametrize(

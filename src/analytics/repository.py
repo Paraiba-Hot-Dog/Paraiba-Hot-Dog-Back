@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from src.analytics import ingestao
 from src.analytics.model import (
-    VERSAO_COLETA_ATUAL,
     CanalAquisicao,
     EventoAnalytics,
     TipoEventoAnalytics,
@@ -88,7 +87,7 @@ def registrar_evento(db: Session, data: EventoAnalyticsCreate) -> EventoAnalytic
         utm_campaign=ingestao.normalizar_utm(data.utm_campaign, "utm_campaign"),
         referrer_host=referrer_host,
         ocorrido_em=ingestao.horario_truncado_utc(),
-        versao_coleta=VERSAO_COLETA_ATUAL,
+        versao_coleta=data.versao_coleta,
     )
     db.add(evento)
     db.commit()
