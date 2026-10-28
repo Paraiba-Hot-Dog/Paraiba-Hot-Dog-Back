@@ -12,6 +12,8 @@ from src.analytics.schema import AquisicaoRead, EventoAnalyticsCreate, PeriodoAq
 from src.database import get_db
 
 # Ingestao publica: registrada sem auth_dependencies e sem ler o token.
+# Fica em /eventos, fora do prefixo /analytics: a lista EasyPrivacy (uBlock
+# Origin) bloqueia qualquer URL com "/analytics/event".
 ingestao_router = APIRouter()
 
 # Leitura do painel: registrada com auth_dependencies em src/main.py.

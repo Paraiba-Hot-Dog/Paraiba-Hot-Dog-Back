@@ -149,7 +149,6 @@ app.include_router(
 )
 app.include_router(
     analytics_ingestao_router,
-    prefix="/analytics",
     tags=["analytics"],
 )
 app.include_router(

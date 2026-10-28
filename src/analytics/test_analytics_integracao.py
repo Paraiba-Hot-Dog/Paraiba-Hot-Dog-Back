@@ -125,7 +125,7 @@ def _enviar(cliente, payload, cabecalhos=None, *, com_versao=True):
     if com_versao and isinstance(payload, dict):
         payload = {"versao_coleta": VERSAO_TESTE, **payload}
     return cliente.post(
-        "/analytics/eventos",
+        "/eventos",
         json=payload,
         headers=CABECALHOS_SITE if cabecalhos is None else cabecalhos,
     )
@@ -243,7 +243,7 @@ def test_ingestao_rejeita_payload_invalido(cliente, db_session, payload):
 def test_ingestao_rejeita_json_malformado(cliente, db_session):
     """Corpo que nao e JSON responde 422 sem ecoar o conteudo."""
     resposta = cliente.post(
-        "/analytics/eventos",
+        "/eventos",
         content=b"tipo=visita_site",
         headers={**CABECALHOS_SITE, "Content-Type": "application/json"},
     )
@@ -881,3 +881,14 @@ def test_filtro_de_unidade_respeita_canal_no_site_inteiro(db_session, unidade):
     assert resultado.indicadores.visitantes == 7
     assert resultado.indicadores.cliques_pedir == 2
     assert str(resultado.indicadores.taxa_visita_clique) == "28.57"
+
+
+def test_rota_antiga_de_ingestao_nao_existe(cliente):
+    """A coleta saiu de /analytics/eventos, que o uBlock Origin bloqueia."""
+    resposta = cliente.post(
+        "/analytics/eventos",
+        json={"tipo": "visita_site", "primeiro_na_visita": True, "versao_coleta": 1},
+        headers=CABECALHOS_SITE,
+    )
+
+    assert resposta.status_code in (404, 405)
