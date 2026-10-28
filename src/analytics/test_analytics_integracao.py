@@ -70,6 +70,7 @@ def override_get_db(db_session):
 def configurar_origem_site(monkeypatch):
     """Fixa a origem aceita pela ingestao, independente do .env local."""
     monkeypatch.setattr(ingestao.settings, "frontend_base_url", ORIGEM_SITE)
+    monkeypatch.setattr(ingestao.settings, "analytics_origens_permitidas", "")
 
 
 @pytest.fixture(name="cliente")
@@ -438,6 +439,53 @@ def test_filtro_aceita_origem_com_barra_no_env(cliente, db_session, monkeypatch)
 
     assert resposta.status_code == 204
     assert len(_eventos(db_session)) == 1
+
+
+@pytest.mark.parametrize(
+    ("origin", "gravado"),
+    [
+        ("https://paraibahotdog.com.br", True),
+        ("https://www.paraibahotdog.com.br", True),
+        ("https://paraibahotdog.netlify.app", True),
+        ("HTTPS://PARAIBAHOTDOG.NETLIFY.APP", True),
+        (ORIGEM_SITE, False),
+        ("http://paraibahotdog.com.br", False),
+        ("https://deploy-preview-3--paraibahotdog.netlify.app", False),
+    ],
+)
+def test_filtro_aceita_lista_de_origens(cliente, db_session, monkeypatch, origin, gravado):
+    """Com ANALYTICS_ORIGENS_PERMITIDAS, vale a lista, e FRONTEND_BASE_URL deixa de contar."""
+    monkeypatch.setattr(
+        ingestao.settings,
+        "analytics_origens_permitidas",
+        " https://paraibahotdog.com.br , https://www.paraibahotdog.com.br/,"
+        "https://paraibahotdog.netlify.app/qualquer/caminho,,sem-esquema",
+    )
+
+    resposta = _enviar(
+        cliente,
+        {"tipo": "visita_site", "primeiro_na_visita": True},
+        {"Origin": origin, "User-Agent": USER_AGENT_NAVEGADOR},
+    )
+
+    assert resposta.status_code == 204
+    assert len(_eventos(db_session)) == (1 if gravado else 0)
+
+
+def test_lista_de_origens_ignora_valores_invalidos(monkeypatch):
+    """Itens vazios ou sem esquema e host nao entram na lista."""
+    monkeypatch.setattr(
+        ingestao.settings, "analytics_origens_permitidas", "sem-esquema, ,https://a.test/x"
+    )
+
+    assert ingestao.origens_permitidas() == frozenset({"https://a.test"})
+
+
+def test_lista_vazia_usa_frontend_base_url(monkeypatch):
+    """Sem a variavel, a unica origem aceita e a de FRONTEND_BASE_URL."""
+    monkeypatch.setattr(ingestao.settings, "analytics_origens_permitidas", "   ")
+
+    assert ingestao.origens_permitidas() == frozenset({ORIGEM_SITE})
 
 
 # -------------------------------------------------------------------- canal

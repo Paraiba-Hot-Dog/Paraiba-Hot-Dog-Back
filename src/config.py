@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     supabase_service_role_key: str = ""
     frontend_base_url: str = "http://localhost:3000"
+    # Origens aceitas na ingestao de analytics, separadas por virgula.
+    # Vazio: vale a origem de FRONTEND_BASE_URL.
+    analytics_origens_permitidas: str = ""
     reset_senha_token_minutos: int = 30
     reset_senha_intervalo_segundos: int = 60
     reset_senha_limite_por_hora: int = 30

@@ -65,12 +65,25 @@ def _origem(url: str) -> str | None:
     return f"{partes.scheme}://{partes.netloc}"
 
 
+def origens_permitidas() -> frozenset[str]:
+    """Origens aceitas na ingestao.
+
+    ANALYTICS_ORIGENS_PERMITIDAS recebe uma lista separada por virgulas
+    (ex.: "https://paraibahotdog.com.br,https://paraibahotdog.netlify.app").
+    Vazia, vale a origem de FRONTEND_BASE_URL. Caminho e barra final sao
+    ignorados; valores sem esquema ou host sao descartados.
+    """
+    brutas = settings.analytics_origens_permitidas.split(",")
+    if not settings.analytics_origens_permitidas.strip():
+        brutas = [settings.frontend_base_url]
+    return frozenset(origem for valor in brutas if (origem := _origem(valor)))
+
+
 def origem_permitida(origin: str | None) -> bool:
-    """Aceita apenas requisicoes vindas do site configurado em FRONTEND_BASE_URL."""
+    """Aceita apenas requisicoes vindas de uma das origens permitidas."""
     if not origin:
         return False
-    esperada = _origem(settings.frontend_base_url)
-    return esperada is not None and _origem(origin) == esperada
+    return _origem(origin) in origens_permitidas()
 
 
 def eh_robo(user_agent: str | None) -> bool:
