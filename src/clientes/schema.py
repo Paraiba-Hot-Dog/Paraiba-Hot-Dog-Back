@@ -1,9 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import re
 from typing import Annotated, Optional
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, field_validator
+
+FUSO_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
 class ClienteTelefoneMixin(BaseModel):
@@ -105,6 +108,14 @@ class AjustePontosRead(BaseModel):
     data_ajuste: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("data_ajuste")
+    @classmethod
+    def converter_para_horario_brasilia(cls, value: datetime) -> datetime:
+        """Converte data_ajuste (gravada em UTC sem fuso) para o horario de Sao Paulo."""
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(FUSO_SAO_PAULO)
 
 
 class ClienteFiltro(ClienteTelefoneMixin):
