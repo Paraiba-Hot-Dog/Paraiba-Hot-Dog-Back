@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session
 
 from src.analytics import ingestao, repository
 from src.analytics.model import CanalAquisicao
-from src.analytics.schema import AquisicaoRead, EventoAnalyticsCreate, PeriodoAquisicao
+from src.analytics.schema import (
+    AnalisesAquisicaoRead,
+    AquisicaoRead,
+    EventoAnalyticsCreate,
+    PeriodoAquisicao,
+)
 from src.database import get_db
 
 # Ingestao publica: registrada sem auth_dependencies e sem ler o token.
@@ -90,6 +95,22 @@ def obter_aquisicao(
 ) -> AquisicaoRead:
     """Retorna o funil e os indicadores de aquisicao. Requer autenticacao."""
     return repository.obter_aquisicao(
+        db,
+        periodo=periodo,
+        unidade_id=unidade_id,
+        canal=canal,
+    )
+
+
+@router.get("/aquisicao/analises", response_model=AnalisesAquisicaoRead)
+def obter_analises_aquisicao(
+    *,
+    periodo: PeriodoAquisicao = Query(PeriodoAquisicao.ultimos_30_dias),
+    unidade_id: int | None = Query(None, gt=0),
+    canal: CanalAquisicao | None = Query(None),
+    db: Session = Depends(get_db),
+) -> AnalisesAquisicaoRead:
+    return repository.obter_analises_aquisicao(
         db,
         periodo=periodo,
         unidade_id=unidade_id,

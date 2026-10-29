@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 from src.analytics.model import (
     VERSAO_COLETA_MAXIMA,
     VERSAO_COLETA_MINIMA,
+    CanalAquisicao,
     TipoEventoAnalytics,
 )
 
@@ -84,3 +85,50 @@ class IndicadoresAquisicaoRead(BaseModel):
 class AquisicaoRead(BaseModel):
     funil: list[FunilEtapaRead]
     indicadores: IndicadoresAquisicaoRead
+
+
+class OrigemCanalRead(BaseModel):
+    canal: CanalAquisicao
+    visitantes: int
+    participacao: Decimal | None
+    cliques_pedir: int
+    escopo_cliques: EscopoAquisicao
+    taxa_visita_clique: Decimal | None
+    escopo_taxa: EscopoAquisicao
+
+
+class AcaoPorTipoRead(BaseModel):
+    tipo: TipoEventoAnalytics
+    total: int
+    escopo: EscopoAquisicao
+
+
+class AcoesGeradasRead(BaseModel):
+    total_acoes: int
+    acoes_por_visita: Decimal | None
+    escopo_acoes_por_visita: EscopoAquisicao
+    por_tipo: list[AcaoPorTipoRead]
+
+
+class ProdutoVisualizadoRead(BaseModel):
+    rank: int
+    produto_id: int | None
+    nome: str
+    visualizacoes: int
+    escopo: EscopoAquisicao
+
+
+class UnidadeComparacaoRead(BaseModel):
+    unidade_id: int | None
+    nome: str
+    escolhas: int
+    participacao_escolhas: Decimal | None
+    cliques_pedir: int
+    taxa_escolha_clique: Decimal | None
+
+
+class AnalisesAquisicaoRead(BaseModel):
+    origem: list[OrigemCanalRead]
+    acoes: AcoesGeradasRead
+    produtos: list[ProdutoVisualizadoRead]
+    unidades: list[UnidadeComparacaoRead]
