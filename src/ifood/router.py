@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import String, and_, case, cast, exists, false, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.functions import count
 
 from src.clientes.model import Cliente
 from src.config import settings
@@ -127,7 +128,7 @@ def centralized_query(filters, unit):
 def centralized(filters: CentralFilters = Depends(), actor=Depends(operator), db: Session = Depends(get_db)):
     unit = unit_scope(actor, filters.unidade_id)
     query, rows = centralized_query(filters, unit)
-    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    total = db.scalar(select(count()).select_from(query.subquery()))
     page = db.execute(query.order_by(rows.c.created_at.desc(), rows.c.origem, rows.c.id.desc())
                       .offset(filters.skip).limit(filters.limit)).mappings()
     result = []
@@ -138,7 +139,7 @@ def centralized(filters: CentralFilters = Depends(), actor=Depends(operator), db
             order = db.get(Pedido, row["id"])
             result.append(local_order_dict(order))
     health = db.get(IfoodHealth, 1)
-    abandoned = select(func.count()).where(
+    abandoned = select(count()).where(
         IfoodEvent.processed.is_(True), IfoodEvent.error.is_not(None),
         IfoodEvent.merchant_id.in_([m for m, u in settings.ifood_test_merchants.items()
                                     if unit is None or u == unit]))
