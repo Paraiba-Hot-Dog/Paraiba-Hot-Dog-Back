@@ -5,6 +5,12 @@ from pydantic_settings import SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    ifood_enabled: bool = False
+    ifood_client_id: str = ""
+    ifood_client_secret: str = ""
+    # JSON: {"merchant-teste": unidade_id}. Only explicitly allowed test stores.
+    ifood_test_merchants: dict[str, int] = {}
+
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
     postgres_host: str = "localhost"

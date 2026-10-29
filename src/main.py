@@ -26,6 +26,7 @@ from src.sobre_nos.router import (
     compat_router as sobre_nos_compat_router,
     router as sobre_nos_router,
 )
+from src.ifood.router import router as ifood_router
 from src.security import get_current_user
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -131,6 +132,8 @@ app.include_router(
     prefix="/duvidas",
     tags=["duvidas"],
 )
+app.include_router(ifood_router, tags=["ifood-testes"], dependencies=auth_dependencies)
+
 app.include_router(
     pedidos_router,
     prefix="/pedidos",

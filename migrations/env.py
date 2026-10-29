@@ -21,6 +21,7 @@ import src.clientes.model  # noqa: F401,E402
 import src.produtos.model  # noqa: F401,E402
 import src.blog.model  # noqa: F401,E402
 import src.duvidas.model  # noqa: F401,E402
+import src.ifood.model  # noqa: F401,E402
 import src.pedidos.model  # noqa: F401,E402
 import src.avaliacoes.model  # noqa: F401,E402
 
