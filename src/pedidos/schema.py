@@ -107,6 +107,7 @@ class CozinhaAdicionalRead(BaseModel):
 
 
 class CozinhaItemRead(BaseModel):
+    created_at: Optional[datetime] = None
     pedido_id: int
     nome_comanda: str
     lote: int

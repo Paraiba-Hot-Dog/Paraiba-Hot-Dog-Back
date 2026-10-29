@@ -10,6 +10,8 @@ from src.clientes.schema import (
     ClienteCreate,
     ClienteFiltro,
     ClienteUpdate,
+    MotivoAjustePontosCreate,
+    MotivoAjustePontosUpdate,
     OperacaoAjustePontos,
 )
 from src.usuarios.model import Usuario
@@ -85,14 +87,53 @@ class AjustePontosInvalido(ValueError):
     """Ajuste de pontos rejeitado por regra de negocio."""
 
 
-def listar_motivos_ajuste(db: Session) -> list[MotivoAjustePontos]:
-    """Lista os motivos de ajuste de pontos ativos, em ordem alfabetica."""
-    return (
-        db.query(MotivoAjustePontos)
-        .filter(MotivoAjustePontos.ativo.is_(True))
-        .order_by(MotivoAjustePontos.descricao.asc())
-        .all()
-    )
+def listar_motivos_ajuste(db: Session, apenas_ativos: bool = True) -> list[MotivoAjustePontos]:
+    """Lista os motivos de ajuste de pontos em ordem alfabetica, por padrao so os ativos."""
+    query = db.query(MotivoAjustePontos)
+    if apenas_ativos:
+        query = query.filter(MotivoAjustePontos.ativo.is_(True))
+    return query.order_by(MotivoAjustePontos.descricao.asc()).all()
+
+
+def obter_motivo_ajuste(db: Session, motivo_id: int) -> MotivoAjustePontos | None:
+    """Retorna o motivo de ajuste pelo ID, ativo ou nao, ou None se nao encontrado."""
+    return db.get(MotivoAjustePontos, motivo_id)
+
+
+def criar_motivo_ajuste(db: Session, data: MotivoAjustePontosCreate) -> MotivoAjustePontos:
+    """Persiste um novo motivo de ajuste de pontos e o retorna."""
+    motivo = MotivoAjustePontos(**data.model_dump())
+    db.add(motivo)
+    db.commit()
+    db.refresh(motivo)
+    return motivo
+
+
+def atualizar_motivo_ajuste(
+    db: Session, motivo_id: int, data: MotivoAjustePontosUpdate
+) -> MotivoAjustePontos | None:
+    """Atualiza os campos fornecidos do motivo e o retorna, ou None se nao encontrado."""
+    motivo = obter_motivo_ajuste(db, motivo_id)
+    if not motivo:
+        return None
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(motivo, field, value)
+    db.commit()
+    db.refresh(motivo)
+    return motivo
+
+
+def excluir_motivo_ajuste(db: Session, motivo_id: int) -> bool:
+    """Desativa (soft delete) um motivo, preservando os ajustes que ja o utilizaram.
+
+    Retorna True se encontrado, False caso contrario.
+    """
+    motivo = obter_motivo_ajuste(db, motivo_id)
+    if not motivo:
+        return False
+    motivo.ativo = False
+    db.commit()
+    return True
 
 
 def _obter_usuario_id(db: Session, auth_provider_id: str | None) -> int | None:
