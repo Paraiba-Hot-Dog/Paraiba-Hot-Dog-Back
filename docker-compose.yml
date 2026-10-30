@@ -29,6 +29,11 @@ services:
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     ports:
       - "8000:8000"
     volumes:
@@ -58,3 +63,21 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+
+  ifood-worker:
+    profiles: ["ifood-testes"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.ifood.worker
+    # Same .env as API, mounted only in this local test setup.
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    volumes:
+      - .:/app
+    depends_on:
+      paraiba-hotdog-back:
+        condition: service_healthy
+    restart: "no"

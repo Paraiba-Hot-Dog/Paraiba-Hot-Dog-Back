@@ -236,3 +236,27 @@ Paraiba-Hot-Dog-Back/
 | `POSTGRES_PORT` | Porta do banco | `5432` |
 
 > No Docker Compose, `POSTGRES_HOST` é sobrescrito automaticamente para `postgres` (nome do serviço).
+
+
+## Protótipo iFood (somente testes)
+
+O painel **Pedidos** (`/admin/pedidos`) reúne comandas e pedidos iFood de teste.
+A integração é desativada por padrão. Configure `IFOOD_ENABLED`, `IFOOD_CLIENT_ID`,
+`IFOOD_CLIENT_SECRET` e `IFOOD_TEST_MERCHANTS` conforme `.env.example`, usando apenas
+lojas de teste e um banco local. Execute as migrações antes de iniciar a API.
+
+```bash
+docker compose --profile ifood-testes up --build
+# Ou, com API/banco já disponíveis:
+python -m src.ifood.worker
+```
+
+Guia completo e roteiro de validação: repositório Paraiba-Hot-Dog-Docs,
+`docs/desenvolvimento/ifood.md`. A homologação, a conta profissional e a verificação
+de coexistência com o Gestor de Pedidos real continuam pendentes.
+
+Testes simulados (sem credenciais e sem chamar serviços externos):
+
+```bash
+python -m pytest src/ifood/test_ifood.py src/pedidos src/bi/test_bi_integracao.py -q
+```

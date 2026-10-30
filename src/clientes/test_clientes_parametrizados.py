@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from src.clientes.model import Cliente, ClienteAjustePontos, MotivoAjustePontos
 from src.database import Base, get_db
 from src.main import app
+from src.security import get_current_user
 from src.usuarios.model import Usuario
 
 client = TestClient(app)
@@ -345,6 +346,7 @@ class TestAjustePontos:
 
         historico = client.get(f"/clientes/{cliente_valido.id}/pontos/historico").json()
         assert len(historico) == 1
+        assert historico[0]["quantidade"] == 5
         assert historico[0]["pontos_anterior"] == 3
         assert historico[0]["pontos_atual"] == 8
         assert historico[0]["motivo"]["descricao"] == "Correcao de falha no ganho de pontos"
@@ -419,3 +421,107 @@ class TestAjustePontos:
         """Historico de cliente inexistente retorna 404."""
         response = client.get("/clientes/9999/pontos/historico")
         assert response.status_code == 404
+
+
+class TestMotivosAjustePontos:
+    """Testes do CRUD de motivos de ajuste de pontos."""
+
+    def test_listar_incluindo_inativos(self, override_get_db, motivos):
+        """Com apenas_ativos=false a auditoria enxerga tambem os desativados."""
+        response = client.get("/clientes/pontos/motivos", params={"apenas_ativos": False})
+        assert response.status_code == 200
+        assert [(m["descricao"], m["ativo"]) for m in response.json()] == [
+            ("Correcao de falha no ganho de pontos", True),
+            ("Motivo antigo", False),
+            ("Outro", True),
+        ]
+
+    def test_obter_motivo(self, override_get_db, motivos):
+        """Busca por ID retorna o motivo mesmo quando inativo."""
+        response = client.get(f"/clientes/pontos/motivos/{motivos['inativo'].id}")
+        assert response.status_code == 200
+        assert response.json()["descricao"] == "Motivo antigo"
+
+    def test_criar_motivo_aparece_na_listagem(self, override_get_db):
+        """Motivo novo fica disponivel imediatamente para os ajustes."""
+        response = client.post(
+            "/clientes/pontos/motivos",
+            json={"descricao": "  Bonificacao  ", "exige_observacao": True},
+        )
+        assert response.status_code == 201
+        assert response.json() == {
+            "id": response.json()["id"],
+            "descricao": "Bonificacao",
+            "exige_observacao": True,
+            "ativo": True,
+        }
+        listagem = client.get("/clientes/pontos/motivos").json()
+        assert [m["descricao"] for m in listagem] == ["Bonificacao"]
+
+    def test_criar_motivo_duplicado(self, override_get_db, motivos):
+        """Descricao repetida retorna 409."""
+        response = client.post("/clientes/pontos/motivos", json={"descricao": "Outro"})
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize("descricao", ["", "   ", "x" * 121])
+    def test_criar_motivo_descricao_invalida(self, override_get_db, descricao):
+        """Descricao vazia ou longa demais e barrada na validacao."""
+        response = client.post("/clientes/pontos/motivos", json={"descricao": descricao})
+        assert response.status_code == 422
+
+    def test_atualizar_motivo(self, override_get_db, motivos):
+        """PATCH altera apenas os campos enviados e permite reativar."""
+        response = client.patch(
+            f"/clientes/pontos/motivos/{motivos['inativo'].id}",
+            json={"descricao": "Motivo reativado", "ativo": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["descricao"] == "Motivo reativado"
+        assert response.json()["ativo"] is True
+        assert response.json()["exige_observacao"] is False
+
+    def test_atualizar_motivo_duplicado(self, override_get_db, motivos):
+        """Renomear para uma descricao existente retorna 409."""
+        response = client.patch(
+            f"/clientes/pontos/motivos/{motivos['correcao'].id}",
+            json={"descricao": "Outro"},
+        )
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize("metodo", ["get", "patch", "delete"])
+    def test_motivo_inexistente(self, override_get_db, metodo):
+        """Operacoes em motivo inexistente retornam 404."""
+        kwargs = {"json": {"ativo": True}} if metodo == "patch" else {}
+        response = getattr(client, metodo)("/clientes/pontos/motivos/9999", **kwargs)
+        assert response.status_code == 404
+
+    def test_excluir_motivo_desativa_e_preserva_historico(
+        self, override_get_db, db_session, cliente_valido, motivos
+    ):
+        """Exclusao apenas desativa: some das opcoes, mas o historico continua intacto."""
+        client.patch(f"/clientes/{cliente_valido.id}", json=_ajuste(motivos["correcao"]))
+
+        response = client.delete(f"/clientes/pontos/motivos/{motivos['correcao'].id}")
+        assert response.status_code == 204
+
+        ativos = client.get("/clientes/pontos/motivos").json()
+        assert [m["descricao"] for m in ativos] == ["Outro"]
+        db_session.expire_all()
+        historico = client.get(f"/clientes/{cliente_valido.id}/pontos/historico").json()
+        assert historico[0]["motivo"]["descricao"] == "Correcao de falha no ganho de pontos"
+        assert historico[0]["motivo"]["ativo"] is False
+
+    @pytest.mark.parametrize(
+        "metodo, rota, corpo",
+        [
+            ("post", "/clientes/pontos/motivos", {"descricao": "Novo"}),
+            ("patch", "/clientes/pontos/motivos/1", {"ativo": False}),
+            ("delete", "/clientes/pontos/motivos/1", None),
+        ],
+    )
+    def test_escrita_exige_administrador(self, override_get_db, metodo, rota, corpo):
+        """Somente administradores podem criar, editar ou excluir motivos."""
+        app.dependency_overrides[get_current_user] = lambda: {"sub": "user", "roles": ["caixa"]}
+        kwargs = {"json": corpo} if corpo is not None else {}
+        response = getattr(client, metodo)(rota, **kwargs)
+        assert response.status_code == 403

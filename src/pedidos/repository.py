@@ -471,6 +471,7 @@ def listar_cozinha(
         primeiro = itens[0]
         resposta.append(
             CozinhaItemRead(
+                created_at=primeiro.created_at,
                 pedido_id=primeiro.pedido_id,
                 nome_comanda=primeiro.pedido.nome_comanda,
                 lote=primeiro.lote,
