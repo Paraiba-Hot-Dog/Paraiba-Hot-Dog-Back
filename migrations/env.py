@@ -24,6 +24,7 @@ import src.duvidas.model  # noqa: F401,E402
 import src.ifood.model  # noqa: F401,E402
 import src.pedidos.model  # noqa: F401,E402
 import src.avaliacoes.model  # noqa: F401,E402
+import src.analytics.model  # noqa: F401,E402
 
 
 config = context.config
