@@ -10,6 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette import status
 
+from src.analytics.router import (
+    ingestao_router as analytics_ingestao_router,
+    router as analytics_router,
+)
 from src.bi.router import router as bi_router
 from src.auth.router import router as auth_router
 from src.clientes.router import router as clientes_router
@@ -144,6 +148,16 @@ app.include_router(
     bi_router,
     prefix="/bi",
     tags=["bi"],
+    dependencies=auth_dependencies,
+)
+app.include_router(
+    analytics_ingestao_router,
+    tags=["analytics"],
+)
+app.include_router(
+    analytics_router,
+    prefix="/analytics",
+    tags=["analytics"],
     dependencies=auth_dependencies,
 )
 app.include_router(
