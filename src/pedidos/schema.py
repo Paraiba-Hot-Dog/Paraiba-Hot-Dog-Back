@@ -21,6 +21,7 @@ class ItemPedidoCreate(BaseModel):
     quantidade: int = Field(..., gt=0)
     observacao: Optional[str] = None
     adicional_ids: list[int] = []
+    produto_nome: Optional[str] = None
 
 
 class ItemPedidoRead(BaseModel):

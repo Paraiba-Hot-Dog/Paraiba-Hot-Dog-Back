@@ -150,6 +150,19 @@ def _receita_liquida_item(pedido: Pedido, receita_item: Decimal, receita_pedido:
     return (receita_item / receita_pedido) * pedido.total
 
 
+def _nome_produto_com_sabor(item: ItemPedido) -> str:
+    if "(" in item.produto_nome and ")" in item.produto_nome:
+        return item.produto_nome
+    if item.observacao:
+        for linha in item.observacao.splitlines():
+            linha_limpa = linha.strip()
+            if linha_limpa.startswith("Sabor:"):
+                sabor = linha_limpa.replace("Sabor:", "").strip()
+                if sabor and sabor not in item.produto_nome:
+                    return f"{item.produto_nome} ({sabor})"
+    return item.produto_nome
+
+
 def _produtos_vendidos(
     pedidos: list[Pedido],
     agora: datetime,
@@ -161,7 +174,7 @@ def _produtos_vendidos(
     anterior; com eles, compara todo o periodo com o periodo anterior informado.
     """
     vendas_por_hora = defaultdict(int)
-    produtos: dict[int, dict[str, Decimal | int | str]] = {}
+    produtos: dict[tuple[int, str], dict[str, Decimal | int | str]] = {}
     ano_anterior, mes_anterior = _mes_anterior(agora)
     comparar_periodos = pedidos_anteriores is not None
 
@@ -173,10 +186,13 @@ def _produtos_vendidos(
 
             receita_item = _item_total(item)
             vendas_por_hora[pedido.created_at.hour] += item.quantidade
+            nome_produto = _nome_produto_com_sabor(item)
+            chave = (item.produto_id, nome_produto)
             produto = produtos.setdefault(
-                item.produto_id,
+                chave,
                 {
-                    "nome": item.produto_nome,
+                    "produto_id": item.produto_id,
+                    "nome": nome_produto,
                     "quantidade": 0,
                     "receita": Decimal("0"),
                     "receita_liquida": Decimal("0"),
@@ -202,9 +218,13 @@ def _produtos_vendidos(
 
     for pedido in pedidos_anteriores or []:
         for item in pedido.itens:
-            if item.status == StatusItemPedido.cancelado or item.produto_id not in produtos:
+            if item.status == StatusItemPedido.cancelado:
                 continue
-            produto = produtos[item.produto_id]
+            nome_produto = _nome_produto_com_sabor(item)
+            chave = (item.produto_id, nome_produto)
+            if chave not in produtos:
+                continue
+            produto = produtos[chave]
             produto["receita_anterior"] = Decimal(produto["receita_anterior"]) + _item_total(item)
 
     return _vendas_por_hora(vendas_por_hora), _top_produtos(produtos)
@@ -224,22 +244,22 @@ def _vendas_por_hora(vendas_por_hora: dict[int, int]) -> list[BiVendaHoraRead]:
     ]
 
 
-def _top_produtos(produtos: dict[int, dict[str, Decimal | int | str]]) -> list[BiProdutoRead]:
+def _top_produtos(produtos: dict[tuple[int, str], dict[str, Decimal | int | str]]) -> list[BiProdutoRead]:
     produtos_ordenados = sorted(
-        produtos.items(),
-        key=lambda item: (int(item[1]["quantidade"]), Decimal(item[1]["receita"])),
+        produtos.values(),
+        key=lambda item: (int(item["quantidade"]), Decimal(item["receita"])),
         reverse=True,
     )
     return [
         BiProdutoRead(
             rank=indice,
-            produto_id=produto_id,
+            produto_id=int(dados["produto_id"]),
             nome=str(dados["nome"]),
             quantidade=int(dados["quantidade"]),
             receita=_money(Decimal(dados["receita"])),
             variacao=_variacao(Decimal(dados["receita_atual"]), Decimal(dados["receita_anterior"])),
         )
-        for indice, (produto_id, dados) in enumerate(produtos_ordenados[:10], start=1)
+        for indice, dados in enumerate(produtos_ordenados[:10], start=1)
     ]
 
 

@@ -25,6 +25,12 @@ from src.produtos.schema import (
     ProdutoAdicionalCreate,
     ProdutoAdicionalRead,
     ProdutoAdicionalUpdate,
+    GrupoOpcaoCreate,
+    GrupoOpcaoRead,
+    GrupoOpcaoUpdate,
+    OpcaoComplementoCreate,
+    OpcaoComplementoRead,
+    VincularGruposProduto,
 )
 from src.security import get_current_user
 
@@ -130,6 +136,13 @@ async def _produto_data_from_request(request: Request) -> ProdutoCreate:
                 "ativo": _form_bool(form.get("ativo"), True),
                 "pontos_fidelidade_por_unidade": form.get("pontos_fidelidade_por_unidade", 0),
                 "disponivel_todas_unidades": _form_bool(form.get("disponivel_todas_unidades"), True),
+                "disponivel_no_combo": _form_bool(
+                    form.get("disponivel_no_combo")
+                    if form.get("disponivel_no_combo") is not None
+                    else form.get("disponivel_combo"),
+                    False,
+                ),
+                "valor_adicional_combo": form.get("valor_adicional_combo", "0.00") or "0.00",
                 "subcategoria_id": form.get("subcategoria_id"),
                 "unidade_ids": unidade_ids,
             }
@@ -145,12 +158,17 @@ async def _produto_data_from_request(request: Request) -> ProdutoCreate:
                     "ativo": form_data["ativo"],
                     "pontos_fidelidade_por_unidade": form_data["pontos_fidelidade_por_unidade"],
                     "disponivel_todas_unidades": form_data["disponivel_todas_unidades"],
+                    "disponivel_no_combo": form_data["disponivel_no_combo"],
+                    "valor_adicional_combo": form_data["valor_adicional_combo"],
                     "subcategoria_id": form_data["subcategoria_id"],
                     "unidade_ids": unidade_ids,
                 }
             )
         if content_type == "application/json":
-            return ProdutoCreate.model_validate(await request.json())
+            json_body = await request.json()
+            if "disponivel_combo" in json_body and "disponivel_no_combo" not in json_body:
+                json_body["disponivel_no_combo"] = json_body["disponivel_combo"]
+            return ProdutoCreate.model_validate(json_body)
         raise _unsupported_media_type()
     except ValidationError as exc:
         raise _erro_validacao(exc) from exc
@@ -171,18 +189,40 @@ async def _produto_update_data_from_request(request: Request) -> ProdutoUpdate:
             form_data = {
                 "nome": form.get("nome"),
                 "descricao": form.get("descricao"),
-                "ativo": _form_bool(form.get("ativo"), True),
-                "pontos_fidelidade_por_unidade": form.get("pontos_fidelidade_por_unidade", 0),
-                "disponivel_todas_unidades": _form_bool(form.get("disponivel_todas_unidades"), True),
+                "ativo": _form_bool(form.get("ativo"), True) if "ativo" in form else None,
+                "pontos_fidelidade_por_unidade": (
+                    form.get("pontos_fidelidade_por_unidade")
+                    if "pontos_fidelidade_por_unidade" in form
+                    else None
+                ),
+                "disponivel_todas_unidades": (
+                    _form_bool(form.get("disponivel_todas_unidades"), True)
+                    if "disponivel_todas_unidades" in form
+                    else None
+                ),
+                "disponivel_no_combo": (
+                    _form_bool(
+                        form.get("disponivel_no_combo")
+                        if "disponivel_no_combo" in form
+                        else form.get("disponivel_combo"),
+                        False,
+                    )
+                    if ("disponivel_no_combo" in form or "disponivel_combo" in form)
+                    else None
+                ),
+                "valor_adicional_combo": form.get("valor_adicional_combo") if "valor_adicional_combo" in form else None,
                 "subcategoria_id": form.get("subcategoria_id"),
-                "unidade_ids": unidade_ids,
+                "unidade_ids": unidade_ids if unidade_ids else None,
             }
             if _is_upload_file(imagem):
                 imagem_url = await salvar_imagem_upload(imagem)
                 form_data["imagem_url"] = imagem_url
-            return ProdutoUpdate.model_validate(form_data)
+            return ProdutoUpdate.model_validate({k: v for k, v in form_data.items() if v is not None})
         if content_type == "application/json":
-            return ProdutoUpdate.model_validate(await request.json())
+            json_body = await request.json()
+            if "disponivel_combo" in json_body and "disponivel_no_combo" not in json_body:
+                json_body["disponivel_no_combo"] = json_body["disponivel_combo"]
+            return ProdutoUpdate.model_validate(json_body)
         raise _unsupported_media_type()
     except ValidationError as exc:
         raise _erro_validacao(exc) from exc
@@ -493,3 +533,109 @@ def excluir_produto(
 ) -> None:
     """Remove um produto pelo ID. Requer autenticacao."""
     repository.excluir_produto(db, produto_id)
+
+
+@router.get(
+    "/grupos/todos",
+    response_model=list[GrupoOpcaoRead],
+)
+def listar_grupos_opcoes(
+    db: Session = Depends(get_db),
+) -> list[GrupoOpcaoRead]:
+    """Retorna todos os grupos de opções com suas respectivas opções."""
+    return repository.listar_grupos_opcoes(db)
+
+
+@router.get(
+    "/grupos/{grupo_id}",
+    response_model=GrupoOpcaoRead,
+)
+def obter_grupo_opcao(
+    grupo_id: int,
+    db: Session = Depends(get_db),
+) -> GrupoOpcaoRead:
+    """Busca um grupo de opções pelo ID."""
+    return repository.obter_grupo_opcao(db, grupo_id)
+
+
+@router.post(
+    "/grupos/",
+    response_model=GrupoOpcaoRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_user)],
+)
+def criar_grupo_opcao(
+    data: GrupoOpcaoCreate,
+    db: Session = Depends(get_db),
+) -> GrupoOpcaoRead:
+    """Cria um novo grupo de opções. Requer autenticação."""
+    return repository.criar_grupo_opcao(db, data)
+
+
+@router.patch(
+    "/grupos/{grupo_id}",
+    response_model=GrupoOpcaoRead,
+    dependencies=[Depends(get_current_user)],
+)
+def atualizar_grupo_opcao(
+    grupo_id: int,
+    data: GrupoOpcaoUpdate,
+    db: Session = Depends(get_db),
+) -> GrupoOpcaoRead:
+    """Atualiza dados de um grupo de opções. Requer autenticação."""
+    return repository.atualizar_grupo_opcao(db, grupo_id, data)
+
+
+@router.delete(
+    "/grupos/{grupo_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(get_current_user)],
+)
+def excluir_grupo_opcao(
+    grupo_id: int,
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove ou desativa um grupo de opções. Requer autenticação."""
+    repository.excluir_grupo_opcao(db, grupo_id)
+
+
+@router.post(
+    "/grupos/{grupo_id}/opcoes",
+    response_model=OpcaoComplementoRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_user)],
+)
+def adicionar_opcao_ao_grupo(
+    grupo_id: int,
+    data: OpcaoComplementoCreate,
+    db: Session = Depends(get_db),
+) -> OpcaoComplementoRead:
+    """Adiciona uma opção a um grupo existente. Requer autenticação."""
+    return repository.adicionar_opcao_ao_grupo(db, grupo_id, data)
+
+
+@router.delete(
+    "/grupos/opcoes/{opcao_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(get_current_user)],
+)
+def excluir_opcao_complemento(
+    opcao_id: int,
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove uma opção de complemento. Requer autenticação."""
+    repository.excluir_opcao_complemento(db, opcao_id)
+
+
+@router.post(
+    "/{produto_id}/grupos",
+    response_model=ProdutoRead,
+    dependencies=[Depends(get_current_user)],
+)
+def vincular_grupos_ao_produto(
+    produto_id: int,
+    data: VincularGruposProduto,
+    db: Session = Depends(get_db),
+) -> ProdutoRead:
+    """Vincula grupos de opções a um produto. Requer autenticação."""
+    return repository.vincular_grupos_ao_produto(db, produto_id, data.grupo_ids)
