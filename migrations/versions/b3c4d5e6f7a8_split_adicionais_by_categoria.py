@@ -67,37 +67,6 @@ def upgrade() -> None:
             {"nome": nome, "preco": preco},
         )
 
-    # 6. Atualiza vínculos em produto_grupos_opcoes
-    # Remove vínculos de bebidas e acompanhamentos (ids 19 a 23) de todos os grupos
-    conn.execute(
-        sa.text("DELETE FROM produto_grupos_opcoes WHERE produto_id IN (19, 20, 21, 22, 23)")
-    )
-
-    # Remove vínculos antigos de adicionais (grupos 3 e 4) dos lanches
-    conn.execute(
-        sa.text("DELETE FROM produto_grupos_opcoes WHERE grupo_id IN (3, 4)")
-    )
-
-    # Vincula Smashdogs (ids 1 a 9) ao Grupo 3 (Adicionais Smashdogs)
-    for prod_id in range(1, 10):
-        conn.execute(
-            sa.text(
-                "INSERT INTO produto_grupos_opcoes (produto_id, grupo_id, ordem) "
-                "VALUES (:prod_id, 3, 2) ON CONFLICT DO NOTHING"
-            ),
-            {"prod_id": prod_id},
-        )
-
-    # Vincula Hotdogs (ids 10 a 18) ao Grupo 4 (Adicionais Hotdogs)
-    for prod_id in range(10, 19):
-        conn.execute(
-            sa.text(
-                "INSERT INTO produto_grupos_opcoes (produto_id, grupo_id, ordem) "
-                "VALUES (:prod_id, 4, 2) ON CONFLICT DO NOTHING"
-            ),
-            {"prod_id": prod_id},
-        )
-
 
 def downgrade() -> None:
     conn = op.get_bind()
