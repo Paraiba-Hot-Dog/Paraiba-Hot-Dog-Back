@@ -27,7 +27,7 @@ from src.pedidos.schema import (
     PedidoCreate,
     PedidoFiltro,
 )
-from src.produtos.model import ProdutoAdicional, ProdutoVariacao
+from src.produtos.model import OpcaoComplemento, ProdutoVariacao
 from src.unidades.model import Unidade
 
 PONTOS_RESGATE_FIDELIDADE = 12
@@ -162,35 +162,53 @@ def _nome_variacao(variacao: ProdutoVariacao) -> str:
     return variacao.nome
 
 
-def _obter_adicionais(db: Session, produto_id: int, adicional_ids: list[int]) -> list[ProdutoAdicional]:
-    """Busca e valida os adicionais de um produto pelos IDs fornecidos, lancando 400 se invalidos."""
+def _obter_adicionais(db: Session, _produto_id: int, adicional_ids: list[int]) -> list[OpcaoComplemento]:
+    """Busca e valida as opcoes de complemento pelos IDs fornecidos."""
     if not adicional_ids:
         return []
 
-    adicionais = (
-        db.query(ProdutoAdicional)
+    opcoes = (
+        db.query(OpcaoComplemento)
         .filter(
-            ProdutoAdicional.id.in_(adicional_ids),
-            ProdutoAdicional.produto_id == produto_id,
+            OpcaoComplemento.id.in_(adicional_ids),
+            OpcaoComplemento.ativo.is_(True),
         )
         .all()
     )
-    if len(adicionais) != len(set(adicional_ids)):
+    if len(opcoes) != len(set(adicional_ids)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Adicional invalido para o produto",
+            detail="Opção adicional inválida para o produto",
         )
-    return adicionais
+    return opcoes
+
+
+def _extrair_sabor_observacao(observacao: str | None) -> str | None:
+    if not observacao:
+        return None
+    for linha in observacao.splitlines():
+        linha_limpa = linha.strip()
+        if linha_limpa.startswith("Sabor:"):
+            return linha_limpa.replace("Sabor:", "").strip()
+    return None
 
 
 def _criar_item(pedido: Pedido, data: ItemPedidoCreate, lote: int, db: Session) -> ItemPedido:
     """Cria e retorna um ItemPedido com seus adicionais a partir dos dados de criacao."""
     variacao = _validar_variacao_disponivel(db, pedido.unidade_id, data.produto_variacao_id)
+    nome_gravado = data.produto_nome
+    if not nome_gravado:
+        sabor = _extrair_sabor_observacao(data.observacao)
+        if sabor and sabor not in variacao.produto.nome:
+            nome_gravado = f"{variacao.produto.nome} ({sabor})"
+        else:
+            nome_gravado = variacao.produto.nome
+
     item = ItemPedido(
         pedido=pedido,
         produto_variacao_id=variacao.id,
         produto_id=variacao.produto_id,
-        produto_nome=variacao.produto.nome,
+        produto_nome=nome_gravado,
         produto_variacao_nome=_nome_variacao(variacao),
         quantidade=data.quantidade,
         preco_unitario=variacao.preco,

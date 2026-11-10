@@ -9,6 +9,8 @@ from src.produtos.model import (
     ProdutoVariacao,
     Subcategoria,
     ProdutoAdicional,
+    GrupoOpcao,
+    OpcaoComplemento,
 )
 from src.produtos.schema import (
     CategoriaCreate,
@@ -21,6 +23,9 @@ from src.produtos.schema import (
     SubcategoriaUpdate,
     ProdutoAdicionalCreate,
     ProdutoAdicionalUpdate,
+    GrupoOpcaoCreate,
+    GrupoOpcaoUpdate,
+    OpcaoComplementoCreate,
 )
 from src.unidades.model import Unidade
 
@@ -460,111 +465,281 @@ def excluir_variacao(
         ) from None
 
 
+def _obter_ou_criar_grupo_adicionais(db: Session) -> GrupoOpcao:
+    """Retorna ou cria o grupo padrao de adicionais."""
+    grupo = (
+        db.query(GrupoOpcao)
+        .filter(GrupoOpcao.nome.ilike("%adicionais%"))
+        .first()
+    )
+    if not grupo:
+        grupo = GrupoOpcao(
+            nome="Adicionais",
+            obrigatorio=False,
+            minimo=0,
+            maximo=None,
+            ativo=True,
+        )
+        db.add(grupo)
+        db.commit()
+        db.refresh(grupo)
+    return grupo
+
+
 def listar_adicionais(
     db: Session,
-) -> list[ProdutoAdicional]:
-    """Retorna todos os adicionais de produto cadastrados."""
-    return db.query(ProdutoAdicional).all()
+) -> list[dict]:
+    """Retorna todos os adicionais cadastrados a partir de opcoes_complemento."""
+    grupo = _obter_ou_criar_grupo_adicionais(db)
+    return [
+        {"id": op.id, "produto_id": 0, "nome": op.nome, "preco": op.preco}
+        for op in grupo.opcoes
+        if op.ativo
+    ]
 
 
 def obter_adicional(
     db: Session,
     adicional_id: int,
-) -> ProdutoAdicional:
-    """Retorna um adicional de produto pelo ID ou lanca 404 se nao encontrado."""
-    adicional = (
-        db.query(ProdutoAdicional)
-        .filter(ProdutoAdicional.id == adicional_id)
+) -> OpcaoComplemento:
+    """Retorna uma opcao de adicional pelo ID ou lanca 404 se nao encontrada."""
+    opcao = (
+        db.query(OpcaoComplemento)
+        .filter(OpcaoComplemento.id == adicional_id)
         .first()
     )
-
-    if adicional is None:
+    if opcao is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Adicional nao encontrado",
         )
-
-    return adicional
+    return opcao
 
 
 def criar_adicional(
     db: Session,
     data: ProdutoAdicionalCreate,
-) -> ProdutoAdicional:
-    """Cria um novo adicional vinculado a um produto existente."""
-    produto = db.get(Produto, data.produto_id)
+) -> dict:
+    """Cria uma opcao dentro do grupo de adicionais e vincula ao produto."""
+    produto = db.get(Produto, data.produto_id) if data.produto_id > 0 else None
+    grupo = _obter_ou_criar_grupo_adicionais(db)
 
-    if not produto:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Produto nao encontrado",
-        )
-
-    adicional = ProdutoAdicional(**data.model_dump())
-
+    opcao = OpcaoComplemento(
+        grupo_id=grupo.id,
+        nome=data.nome,
+        preco=data.preco,
+        ativo=True,
+    )
     try:
-        db.add(adicional)
+        db.add(opcao)
+        if produto and grupo not in produto.grupos:
+            produto.grupos.append(grupo)
         db.commit()
-        db.refresh(adicional)
-
+        db.refresh(opcao)
     except IntegrityError:
         db.rollback()
-
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Erro ao criar adicional",
         ) from None
 
-    return adicional
+    return {
+        "id": opcao.id,
+        "produto_id": data.produto_id,
+        "nome": opcao.nome,
+        "preco": opcao.preco,
+    }
 
 
 def atualizar_adicional(
     db: Session,
     adicional_id: int,
     data: ProdutoAdicionalUpdate,
-) -> ProdutoAdicional:
-    """Atualiza os campos fornecidos de um adicional de produto existente."""
-    adicional = obter_adicional(
-        db,
-        adicional_id,
-    )
-
-    for key, value in data.model_dump(exclude_unset=True).items():
-        setattr(adicional, key, value)
+) -> dict:
+    """Atualiza os campos fornecidos de uma opcao de adicional."""
+    opcao = obter_adicional(db, adicional_id)
+    if data.nome is not None:
+        opcao.nome = data.nome
+    if data.preco is not None:
+        opcao.preco = data.preco
 
     try:
         db.commit()
-        db.refresh(adicional)
-
+        db.refresh(opcao)
     except IntegrityError:
         db.rollback()
-
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Erro ao atualizar adicional",
         ) from None
 
-    return adicional
+    produto_id = 0
+    if opcao.grupo and opcao.grupo.produtos:
+        produto_id = opcao.grupo.produtos[0].id
+
+    return {
+        "id": opcao.id,
+        "produto_id": produto_id,
+        "nome": opcao.nome,
+        "preco": opcao.preco,
+    }
 
 
 def excluir_adicional(
     db: Session,
     adicional_id: int,
 ) -> None:
-    """Remove permanentemente um adicional de produto do banco de dados."""
-    adicional = obter_adicional(
-        db,
-        adicional_id,
-    )
-
+    """Remove permanentemente uma opcao de adicional."""
+    opcao = obter_adicional(db, adicional_id)
     try:
-        db.delete(adicional)
+        db.delete(opcao)
         db.commit()
-
     except IntegrityError:
         db.rollback()
-
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Erro ao excluir adicional",
         ) from None
+
+
+def listar_grupos_opcoes(db: Session) -> list[GrupoOpcao]:
+    """Retorna todos os grupos de opcoes cadastrados."""
+    return db.query(GrupoOpcao).filter(GrupoOpcao.ativo.is_(True)).all()
+
+
+def obter_grupo_opcao(db: Session, grupo_id: int) -> GrupoOpcao:
+    """Busca um grupo de opcoes pelo ID ou lanca 404."""
+    grupo = db.query(GrupoOpcao).filter(GrupoOpcao.id == grupo_id).first()
+    if not grupo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Grupo de opções não encontrado",
+        )
+    return grupo
+
+
+def criar_grupo_opcao(db: Session, data: GrupoOpcaoCreate) -> GrupoOpcao:
+    """Cria um novo grupo de opcoes e suas opcoes iniciais."""
+    grupo = GrupoOpcao(
+        nome=data.nome,
+        obrigatorio=data.obrigatorio,
+        minimo=data.minimo,
+        maximo=data.maximo,
+        ativo=data.ativo,
+    )
+    for opcao_data in data.opcoes:
+        grupo.opcoes.append(
+            OpcaoComplemento(
+                nome=opcao_data.nome,
+                preco=opcao_data.preco,
+                ativo=opcao_data.ativo,
+            )
+        )
+    try:
+        db.add(grupo)
+        db.commit()
+        db.refresh(grupo)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Erro ao criar grupo de opções",
+        ) from None
+    return grupo
+
+
+def atualizar_grupo_opcao(
+    db: Session,
+    grupo_id: int,
+    data: GrupoOpcaoUpdate,
+) -> GrupoOpcao:
+    """Atualiza dados de um grupo de opcoes."""
+    grupo = obter_grupo_opcao(db, grupo_id)
+    for key, value in data.model_dump(exclude_unset=True).items():
+        setattr(grupo, key, value)
+    try:
+        db.commit()
+        db.refresh(grupo)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Erro ao atualizar grupo de opções",
+        ) from None
+    return grupo
+
+
+def excluir_grupo_opcao(db: Session, grupo_id: int) -> None:
+    """Desativa ou remove um grupo de opcoes."""
+    grupo = obter_grupo_opcao(db, grupo_id)
+    try:
+        db.delete(grupo)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        grupo.ativo = False
+        db.commit()
+
+
+def adicionar_opcao_ao_grupo(
+    db: Session,
+    grupo_id: int,
+    data: OpcaoComplementoCreate,
+) -> OpcaoComplemento:
+    """Adiciona uma nova opcao a um grupo existente."""
+    grupo = obter_grupo_opcao(db, grupo_id)
+    opcao = OpcaoComplemento(
+        grupo_id=grupo.id,
+        nome=data.nome,
+        preco=data.preco,
+        ativo=data.ativo,
+    )
+    try:
+        db.add(opcao)
+        db.commit()
+        db.refresh(opcao)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Erro ao adicionar opção",
+        ) from None
+    return opcao
+
+
+def excluir_opcao_complemento(db: Session, opcao_id: int) -> None:
+    """Remove uma opcao de complemento."""
+    opcao = db.query(OpcaoComplemento).filter(OpcaoComplemento.id == opcao_id).first()
+    if not opcao:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opção não encontrada",
+        )
+    try:
+        db.delete(opcao)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        opcao.ativo = False
+        db.commit()
+
+
+def vincular_grupos_ao_produto(
+    db: Session,
+    produto_id: int,
+    grupo_ids: list[int],
+) -> Produto:
+    """Vincula grupos de opcoes a um produto especifico."""
+    produto = obter_produto(db, produto_id)
+    grupos = db.query(GrupoOpcao).filter(GrupoOpcao.id.in_(grupo_ids)).all()
+    produto.grupos = grupos
+    try:
+        db.commit()
+        db.refresh(produto)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Erro ao vincular grupos ao produto",
+        ) from None
+    return produto.grupos

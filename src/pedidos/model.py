@@ -12,7 +12,7 @@ from src.database import Base
 
 if TYPE_CHECKING:
     from src.clientes.model import Cliente
-    from src.produtos.model import ProdutoAdicional, ProdutoVariacao
+    from src.produtos.model import OpcaoComplemento, ProdutoVariacao
     from src.unidades.model import Unidade
 
 
@@ -114,9 +114,12 @@ class ItemPedidoAdicional(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     item_pedido_id: Mapped[int] = mapped_column(ForeignKey("itens_pedido.id"), nullable=False)
-    adicional_id: Mapped[int | None] = mapped_column(ForeignKey("produto_adicionais.id"), nullable=True)
+    adicional_id: Mapped[int | None] = mapped_column(
+        ForeignKey("opcoes_complemento.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     nome: Mapped[str] = mapped_column(String(255), nullable=False)
     preco: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
     item: Mapped[ItemPedido] = relationship("ItemPedido", back_populates="adicionais")
-    adicional: Mapped[ProdutoAdicional | None] = relationship("ProdutoAdicional", lazy="joined")
+    adicional: Mapped[OpcaoComplemento | None] = relationship("OpcaoComplemento", lazy="joined")
