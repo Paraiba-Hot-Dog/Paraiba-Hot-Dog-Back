@@ -30,7 +30,8 @@ def _build_database_url() -> str:
 
 DATABASE_URL = _build_database_url()
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+_connect_args = {"connect_timeout": 10} if not DATABASE_URL.startswith("sqlite") else {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=_connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

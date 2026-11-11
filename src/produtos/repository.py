@@ -32,7 +32,7 @@ from src.unidades.model import Unidade
 
 def listar_categorias(db: Session) -> list[Categoria]:
     """Retorna todas as categorias cadastradas."""
-    return db.query(Categoria).all()
+    return db.query(Categoria).order_by(Categoria.id.asc()).all()
 
 
 def criar_categoria(db: Session, data: CategoriaCreate) -> Categoria:
@@ -111,7 +111,7 @@ def excluir_categoria(db: Session, categoria_id: int) -> None:
 
 def listar_subcategorias(db: Session) -> list[Subcategoria]:
     """Retorna todas as subcategorias cadastradas."""
-    return db.query(Subcategoria).all()
+    return db.query(Subcategoria).order_by(Subcategoria.id.asc()).all()
 
 
 def criar_subcategoria(db: Session, data: SubcategoriaCreate) -> Subcategoria:
@@ -218,7 +218,7 @@ def listar_produtos(
                 Produto.unidades.any(Unidade.id == unidade_id),
             )
         )
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(Produto.id.asc()).offset(skip).limit(limit).all()
 
 
 def obter_produto(db: Session, produto_id: int) -> Produto:
