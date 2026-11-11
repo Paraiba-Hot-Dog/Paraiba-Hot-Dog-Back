@@ -16,6 +16,7 @@ from src.unidades.schema import (
     UnidadeUpdate,
 )
 from src.security import require_roles
+from src.storage import upload_para_supabase_ou_local
 
 router = APIRouter()
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "unidades"
@@ -38,21 +39,14 @@ ATUALIZAR_UNIDADE_REQUEST_BODY = _multipart_request_body(UnidadeMultipartUpdate)
 
 
 async def salvar_imagem_upload(imagem: UploadFile) -> str:
-    """Salva uma imagem de unidade enviada via multipart e retorna a URL publica."""
+    """Salva uma imagem de unidade via Supabase Storage ou localmente."""
     if not imagem.content_type or not imagem.content_type.startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Envie um arquivo de imagem valido.",
         )
 
-    extensao = Path(imagem.filename or "").suffix.lower()
-    nome_arquivo = f"{uuid4()}{extensao}"
-    caminho = UPLOAD_DIR / nome_arquivo
-
-    with caminho.open("wb") as buffer:
-        buffer.write(await imagem.read())
-
-    return f"/uploads/unidades/{nome_arquivo}"
+    return await upload_para_supabase_ou_local(imagem, "unidades", UPLOAD_DIR)
 
 
 def _erro_validacao(exc: ValidationError) -> HTTPException:

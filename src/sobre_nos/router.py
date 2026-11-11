@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from src.database import get_db
 from src.security import require_roles
 from src.sobre_nos import repository
+from src.storage import upload_para_supabase_ou_local
 from src.sobre_nos.schema import (
     SobreNosImagemCreate,
     SobreNosImagemRead,
@@ -43,7 +44,7 @@ LIMITE_VIDEO_BYTES = 10 * 1024 * 1024
 
 
 async def salvar_imagem_upload(imagem: UploadFile) -> str:
-    """Salva uma imagem ou um MP4 pequeno e retorna a URL publica."""
+    """Salva uma imagem ou um MP4 pequeno via Supabase Storage ou localmente."""
     content_type = (imagem.content_type or "").lower()
     extensao = Path(imagem.filename or "").suffix.lower()
     tipos_aceitos = {**TIPOS_IMAGEM, **TIPOS_VIDEO}
@@ -62,13 +63,7 @@ async def salvar_imagem_upload(imagem: UploadFile) -> str:
             detail=f"O arquivo deve ter no maximo {limite_mb} MB.",
         )
 
-    nome_arquivo = f"{uuid4()}{extensao}"
-    caminho = UPLOAD_DIR / nome_arquivo
-
-    with caminho.open("wb") as buffer:
-        buffer.write(conteudo)
-
-    return f"/uploads/sobre_nos/{nome_arquivo}"
+    return await upload_para_supabase_ou_local(imagem, "sobre_nos", UPLOAD_DIR, conteudo=conteudo)
 
 
 def _remover_imagem_url(imagem_url: str | None) -> None:
