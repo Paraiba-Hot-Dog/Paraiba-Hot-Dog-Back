@@ -10,6 +10,7 @@ from src.blog import repository
 from src.blog.schema import BlogCreate, BlogMultipartCreate, BlogRead, BlogUpdate
 from src.database import get_db
 from src.security import get_current_user
+from src.storage import upload_para_supabase_ou_local
 
 router = APIRouter()
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "blog"
@@ -31,21 +32,14 @@ CRIAR_POST_REQUEST_BODY = _multipart_request_body(BlogMultipartCreate)
 
 
 async def salvar_imagem_upload(imagem: UploadFile) -> str:
-    """Salva uma imagem enviada via multipart e retorna a URL publica."""
+    """Salva uma imagem enviada via multipart para Supabase Storage ou localmente."""
     if not imagem.content_type or not imagem.content_type.startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Envie um arquivo de imagem valido.",
         )
 
-    extensao = Path(imagem.filename or "").suffix.lower()
-    nome_arquivo = f"{uuid4()}{extensao}"
-    caminho = UPLOAD_DIR / nome_arquivo
-
-    with caminho.open("wb") as buffer:
-        buffer.write(await imagem.read())
-
-    return f"/uploads/blog/{nome_arquivo}"
+    return await upload_para_supabase_ou_local(imagem, "blog", UPLOAD_DIR)
 
 
 def _erro_validacao(exc: ValidationError) -> HTTPException:
