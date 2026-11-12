@@ -1,4 +1,6 @@
+import base64
 import json
+import os
 from time import monotonic
 from typing import Any
 from urllib.error import URLError
@@ -73,8 +75,29 @@ def _get_signing_key(token: str) -> dict[str, Any]:
     raise _auth_exception("Chave de assinatura do token nao encontrada")
 
 
+def _dev_auth_enabled() -> bool:
+    """Verifica se o login fake local esta habilitado (apenas fora de producao)."""
+    if os.getenv("RENDER") or "vercel.app" in os.getenv("FRONTEND_BASE_URL", ""):
+        return False
+    return os.getenv("DEV_AUTH_LOCAL_ENABLED", "true").lower() in ("1", "true")
+
+
 def decode_supabase_token(token: str) -> dict[str, Any]:
     """Valida o JWT do Supabase Auth e retorna o payload."""
+    if _dev_auth_enabled() and token.startswith("eyJ"):
+        try:
+            partes = token.split(".")
+            if len(partes) >= 2:
+                payload_raw = partes[1]
+                payload_raw += "=" * ((4 - len(payload_raw) % 4) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_raw.encode()).decode())
+                email_dev = payload.get("email") == "dev@teste.com"
+                sub_dev = payload.get("sub") == "a8845965-dc2f-4bd6-a83d-6892376927c3"
+                if email_dev and sub_dev:
+                    return payload
+        except (ValueError, KeyError, json.JSONDecodeError):
+            pass
+
     key = _get_signing_key(token)
     try:
         payload = jwt.decode(
