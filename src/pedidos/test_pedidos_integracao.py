@@ -315,3 +315,56 @@ def test_cancelamento_parcial_divide_item(cliente, cardapio_base):
     assert item_ativo["quantidade"] == 3
     assert item_cancelado["quantidade"] == 1
     assert item_cancelado["motivo_cancelamento"] == "Cliente desistiu de uma unidade"
+
+
+@pytest.mark.integration
+def test_para_viagem_pedido_e_cozinha(cliente, cardapio_base):
+    """Garante criacao, atualizacao e exibicao do marcador para_viagem na cozinha."""
+    unidade_id = cardapio_base["unidade"].id
+    variacao_id = cardapio_base["variacao"].id
+
+    resposta_criacao = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": unidade_id,
+            "nome_comanda": "Viagem 1",
+            "cliente_id": None,
+            "observacao": None,
+            "para_viagem": True,
+            "itens": [
+                {
+                    "produto_variacao_id": variacao_id,
+                    "quantidade": 1,
+                    "observacao": None,
+                    "adicional_ids": [],
+                }
+            ],
+        },
+    )
+    assert resposta_criacao.status_code == 201
+    pedido = resposta_criacao.json()
+    assert pedido["para_viagem"] is True
+
+    cozinha = cliente.get(f"/pedidos/cozinha?unidade_id={unidade_id}").json()
+    assert len(cozinha) == 1
+    assert cozinha[0]["para_viagem"] is True
+
+    resposta_patch = cliente.patch(
+        f"/pedidos/{pedido['id']}/para-viagem",
+        json={"para_viagem": False},
+    )
+    assert resposta_patch.status_code == 200
+    assert resposta_patch.json()["para_viagem"] is False
+
+    cozinha_atualizada = cliente.get(f"/pedidos/cozinha?unidade_id={unidade_id}").json()
+    assert cozinha_atualizada[0]["para_viagem"] is False
+
+    cliente.post(
+        f"/pedidos/{pedido['id']}/cancelar",
+        json={"motivo_cancelamento": "Teste cancelamento"},
+    )
+    resposta_cancelado = cliente.patch(
+        f"/pedidos/{pedido['id']}/para-viagem",
+        json={"para_viagem": True},
+    )
+    assert resposta_cancelado.status_code == 400

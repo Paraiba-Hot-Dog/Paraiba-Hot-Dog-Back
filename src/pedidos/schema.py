@@ -49,6 +49,7 @@ class PedidoCreate(BaseModel):
     nome_comanda: str = Field(..., min_length=1, max_length=120)
     cliente_id: Optional[int] = Field(None, gt=0)
     observacao: Optional[str] = None
+    para_viagem: bool = False
     usar_desconto_fidelidade: bool = False
     itens: list[ItemPedidoCreate] = []
 
@@ -64,6 +65,7 @@ class PedidoRead(BaseModel):
     total: Decimal
     forma_pagamento: Optional[FormaPagamento] = None
     observacao: Optional[str] = None
+    para_viagem: bool = False
     pontos_fidelidade_utilizados: int
     pontos_fidelidade_creditados: bool
     created_at: datetime
@@ -82,6 +84,7 @@ class PedidoFiltro(BaseModel):
 
 class AdicionarItensPedido(BaseModel):
     itens: list[ItemPedidoCreate] = Field(..., min_length=1)
+    para_viagem: Optional[bool] = None
 
 
 class CancelarItemPedido(BaseModel):
@@ -97,8 +100,13 @@ class CancelarPedido(BaseModel):
     motivo_cancelamento: str = Field(..., min_length=1)
 
 
+class AtualizarParaViagemPedido(BaseModel):
+    para_viagem: bool
+
+
 class FinalizarPedido(BaseModel):
     forma_pagamento: FormaPagamento
+    para_viagem: Optional[bool] = None
 
 
 class CozinhaAdicionalRead(BaseModel):
@@ -111,6 +119,7 @@ class CozinhaItemRead(BaseModel):
     created_at: Optional[datetime] = None
     pedido_id: int
     nome_comanda: str
+    para_viagem: bool = False
     lote: int
     produto_variacao_id: int
     produto_id: int

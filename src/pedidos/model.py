@@ -56,6 +56,7 @@ class Pedido(Base):
         nullable=True,
     )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    para_viagem: Mapped[bool] = mapped_column(default=False, nullable=False)
     pontos_fidelidade_utilizados: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     pontos_fidelidade_creditados: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
