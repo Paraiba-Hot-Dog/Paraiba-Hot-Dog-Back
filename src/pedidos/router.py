@@ -6,6 +6,7 @@ from src.pedidos import repository
 from src.pedidos.schema import (
     AdicionarItensPedido,
     AumentarQuantidadeItemPedido,
+    AtualizarParaViagemPedido,
     AtualizarStatusCozinha,
     CancelarItemPedido,
     CancelarPedido,
@@ -99,6 +100,16 @@ def cancelar_pedido(
 ) -> PedidoRead:
     """Cancela um pedido aberto, registrando o motivo do cancelamento."""
     return repository.cancelar_pedido(db, pedido_id, data)
+
+
+@router.patch("/{pedido_id}/para-viagem", response_model=PedidoRead)
+def atualizar_para_viagem(
+    pedido_id: int,
+    data: AtualizarParaViagemPedido,
+    db: Session = Depends(get_db),
+) -> PedidoRead:
+    """Marca ou desmarca se um pedido aberto ou em andamento e para viagem."""
+    return repository.atualizar_para_viagem(db, pedido_id, data)
 
 
 @router.post("/{pedido_id}/finalizar", response_model=PedidoRead)

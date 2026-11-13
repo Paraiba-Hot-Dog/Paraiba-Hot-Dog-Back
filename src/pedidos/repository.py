@@ -17,6 +17,7 @@ from src.pedidos.model import (
 from src.pedidos.schema import (
     AdicionarItensPedido,
     AumentarQuantidadeItemPedido,
+    AtualizarParaViagemPedido,
     AtualizarStatusCozinha,
     CancelarItemPedido,
     CancelarPedido,
@@ -249,6 +250,7 @@ def criar_pedido(db: Session, data: PedidoCreate) -> Pedido:
         nome_comanda=data.nome_comanda,
         cliente_id=data.cliente_id,
         observacao=data.observacao,
+        para_viagem=data.para_viagem,
         pontos_fidelidade_utilizados=PONTOS_RESGATE_FIDELIDADE if data.usar_desconto_fidelidade else 0,
     )
     pedido.itens = [_criar_item(pedido, item_data, 1, db) for item_data in data.itens]
@@ -267,11 +269,24 @@ def adicionar_itens(db: Session, pedido_id: int, data: AdicionarItensPedido) -> 
     _validar_pedido_nao_em_preparo(pedido)
     _reabrir_pedido_pago(db, pedido)
 
+    if data.para_viagem is not None:
+        pedido.para_viagem = data.para_viagem
+
     proximo_lote = max((item.lote for item in pedido.itens), default=0) + 1
     for item_data in data.itens:
         pedido.itens.append(_criar_item(pedido, item_data, proximo_lote, db))
     _recalcular_totais(pedido)
 
+    db.commit()
+    db.refresh(pedido)
+    return pedido
+
+
+def atualizar_para_viagem(db: Session, pedido_id: int, data: AtualizarParaViagemPedido) -> Pedido:
+    """Atualiza se o pedido inteiro e para viagem enquanto nao estiver cancelado."""
+    pedido = obter_pedido(db, pedido_id)
+    _validar_pedido_nao_cancelado(pedido)
+    pedido.para_viagem = data.para_viagem
     db.commit()
     db.refresh(pedido)
     return pedido
@@ -423,6 +438,9 @@ def finalizar_pedido(db: Session, pedido_id: int, data: FinalizarPedido) -> Pedi
         cliente.pontos_fidelidade += pontos
         pedido.pontos_fidelidade_creditados = True
 
+    if data.para_viagem is not None:
+        pedido.para_viagem = data.para_viagem
+
     pedido.status = StatusPedido.pago
     pedido.forma_pagamento = data.forma_pagamento
     pedido.fechado_em = datetime.utcnow()
@@ -492,6 +510,7 @@ def listar_cozinha(
                 created_at=primeiro.created_at,
                 pedido_id=primeiro.pedido_id,
                 nome_comanda=primeiro.pedido.nome_comanda,
+                para_viagem=bool(primeiro.pedido.para_viagem),
                 lote=primeiro.lote,
                 produto_variacao_id=primeiro.produto_variacao_id,
                 produto_id=primeiro.produto_id,
