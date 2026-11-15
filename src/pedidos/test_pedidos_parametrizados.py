@@ -252,8 +252,8 @@ def test_formas_pagamento(cliente, cardapio_base, forma_pagamento):
     "cliente_id, pontos_cliente, status_esperado",
     [
         (None, 0, 400),
-        ("cliente", 11, 400),
-        ("cliente", 12, 201),
+        ("cliente", 9, 400),
+        ("cliente", 10, 201),
     ],
 )
 def test_validacoes_desconto_fidelidade(

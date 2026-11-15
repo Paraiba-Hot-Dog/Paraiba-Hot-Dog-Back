@@ -196,7 +196,7 @@ def test_criar_pagar_e_manter_item_na_cozinha(cliente, cardapio_base):
 @pytest.mark.integration
 def test_resgate_fidelidade_aplica_desconto_e_debita_pontos_no_pagamento(cliente, cardapio_base):
     """Garante aplicacao e baixa de pontos no desconto fidelidade."""
-    cardapio_base["cliente"].pontos_fidelidade = 12
+    cardapio_base["cliente"].pontos_fidelidade = 10
 
     resposta_pedido = cliente.post(
         "/pedidos/",
@@ -220,7 +220,7 @@ def test_resgate_fidelidade_aplica_desconto_e_debita_pontos_no_pagamento(cliente
     assert pedido["subtotal"] == "19.90"
     assert pedido["desconto_fidelidade"] == "17.00"
     assert pedido["total"] == "2.90"
-    assert pedido["pontos_fidelidade_utilizados"] == 12
+    assert pedido["pontos_fidelidade_utilizados"] == 10
 
     resposta_pagamento = cliente.post(
         f"/pedidos/{pedido['id']}/finalizar",
@@ -368,3 +368,177 @@ def test_para_viagem_pedido_e_cozinha(cliente, cardapio_base):
         json={"para_viagem": True},
     )
     assert resposta_cancelado.status_code == 400
+
+
+@pytest.mark.integration
+def test_adicionar_itens_em_pedido_aberto_soma_subtotal_sem_duplicar(cliente, cardapio_base):
+    """Garante que novos lotes adicionados entram uma unica vez no subtotal e no total."""
+    unidade_id = cardapio_base["unidade"].id
+    variacao_id = cardapio_base["variacao"].id
+
+    criacao = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": unidade_id,
+            "nome_comanda": "Lote Extra",
+            "itens": [{"produto_variacao_id": variacao_id, "quantidade": 1, "adicional_ids": []}],
+        },
+    )
+    assert criacao.status_code == 201
+    pedido_id = criacao.json()["id"]
+
+    adicao = cliente.post(
+        f"/pedidos/{pedido_id}/itens",
+        json={
+            "itens": [{"produto_variacao_id": variacao_id, "quantidade": 1, "adicional_ids": []}],
+        },
+    )
+    assert adicao.status_code == 200
+    dados = adicao.json()
+    assert len(dados["itens"]) == 2
+    assert dados["subtotal"] == "39.80"
+    assert dados["total"] == "39.80"
+
+
+@pytest.mark.integration
+def test_acrescimo_combo_entra_no_total_salvo(cliente, db_session, cardapio_base):
+    """Garante que o adicional de produto no combo e validado e somado no servidor."""
+    bebida_combo = Produto(
+        nome="Suco Del Valle Uva",
+        descricao="Lata 290ml",
+        ativo=True,
+        disponivel_no_combo=True,
+        valor_adicional_combo=Decimal("3.00"),
+        disponivel_todas_unidades=True,
+        subcategoria_id=cardapio_base["produto"].subcategoria_id,
+    )
+    produto_fora_combo = Produto(
+        nome="Item Fora do Combo",
+        descricao="Nao elegivel",
+        ativo=True,
+        disponivel_no_combo=False,
+        valor_adicional_combo=Decimal("5.00"),
+        disponivel_todas_unidades=True,
+        subcategoria_id=cardapio_base["produto"].subcategoria_id,
+    )
+    db_session.add_all([bebida_combo, produto_fora_combo])
+    db_session.commit()
+
+    resposta = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Combo com Suco",
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 2,
+                    "observacao": "Combo: Batata Chips + Suco Del Valle Uva",
+                    "adicional_ids": [],
+                    "combo_produto_ids": [bebida_combo.id],
+                }
+            ],
+        },
+    )
+    assert resposta.status_code == 201
+    dados = resposta.json()
+    assert dados["itens"][0]["preco_unitario"] == "22.90"
+    assert dados["subtotal"] == "45.80"
+    assert dados["total"] == "45.80"
+
+    invalido = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Combo Invalido",
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 1,
+                    "adicional_ids": [],
+                    "combo_produto_ids": [produto_fora_combo.id],
+                }
+            ],
+        },
+    )
+    assert invalido.status_code == 400
+
+
+@pytest.mark.integration
+def test_nao_permite_alterar_nem_reabrir_pedido_pago(cliente, cardapio_base):
+    """Garante que pedidos ja pagos nao podem receber, aumentar, editar ou cancelar itens."""
+    unidade_id = cardapio_base["unidade"].id
+    variacao_id = cardapio_base["variacao"].id
+
+    criacao = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": unidade_id,
+            "nome_comanda": "Pedido Pago",
+            "cliente_id": cardapio_base["cliente"].id,
+            "itens": [{"produto_variacao_id": variacao_id, "quantidade": 1, "adicional_ids": []}],
+        },
+    )
+    assert criacao.status_code == 201
+    pedido_id = criacao.json()["id"]
+    item_id = criacao.json()["itens"][0]["id"]
+
+    assert cliente.post(f"/pedidos/{pedido_id}/finalizar", json={"forma_pagamento": "pix"}).status_code == 200
+
+    assert (
+        cliente.post(
+            f"/pedidos/{pedido_id}/itens",
+            json={"itens": [{"produto_variacao_id": variacao_id, "quantidade": 1, "adicional_ids": []}]},
+        ).status_code
+        == 400
+    )
+    assert cliente.post(f"/pedidos/itens/{item_id}/aumentar", json={"quantidade": 1}).status_code == 400
+    assert (
+        cliente.post(
+            f"/pedidos/itens/{item_id}/cancelar",
+            json={"motivo_cancelamento": "Tentativa"},
+        ).status_code
+        == 400
+    )
+    assert cliente.patch(f"/pedidos/itens/{item_id}", json={"observacao": "Sem milho"}).status_code == 400
+
+    pedido_atual = cliente.get(f"/pedidos/{pedido_id}").json()
+    assert pedido_atual["status"] == "pago"
+    assert len(pedido_atual["itens"]) == 1
+
+
+@pytest.mark.integration
+def test_atualizar_observacao_item_aberto(cliente, cardapio_base):
+    """Garante edicao de observacao de item aberto antes do preparo e bloqueio apos preparo."""
+    unidade_id = cardapio_base["unidade"].id
+    variacao_id = cardapio_base["variacao"].id
+
+    criacao = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": unidade_id,
+            "nome_comanda": "Editar Obs",
+            "itens": [
+                {
+                    "produto_variacao_id": variacao_id,
+                    "quantidade": 1,
+                    "observacao": "Maionese: Ervas",
+                    "adicional_ids": [],
+                }
+            ],
+        },
+    )
+    assert criacao.status_code == 201
+    pedido_id = criacao.json()["id"]
+    item_id = criacao.json()["itens"][0]["id"]
+
+    atualizacao = cliente.patch(
+        f"/pedidos/itens/{item_id}",
+        json={"observacao": "Maionese: Ervas\nObs: sem cebola"},
+    )
+    assert atualizacao.status_code == 200
+    assert atualizacao.json()["itens"][0]["observacao"] == "Maionese: Ervas\nObs: sem cebola"
+
+    cliente.patch("/pedidos/cozinha/status", json={"pedido_id": pedido_id, "lote": 1, "status": "preparando"})
+    bloqueado = cliente.patch(f"/pedidos/itens/{item_id}", json={"observacao": "Obs: tarde demais"})
+    assert bloqueado.status_code == 400

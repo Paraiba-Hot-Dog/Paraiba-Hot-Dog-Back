@@ -322,9 +322,9 @@ def test_dashboard_intervalo_compara_com_periodo_anterior(db_session):
         [
             # Periodo anterior (01/03 a 10/03): 1 pedido de 100.
             pedido(datetime(2026, 3, 5, 13), "100.00"),
-            # Periodo filtrado (11/03 a 20/03): 2 pedidos somando 300.
+            # Periodo filtrado (11/03 a 20/03): 2 pedidos somando 300 (02:00 UTC do dia 21 = 23h de 20/03 em Brasilia).
             pedido(datetime(2026, 3, 11, 12), "100.00"),
-            pedido(datetime(2026, 3, 20, 23), "200.00", quantidade=2),
+            pedido(datetime(2026, 3, 21, 2), "200.00", quantidade=2),
             # Fora de qualquer um dos periodos.
             pedido(datetime(2026, 3, 21, 13), "999.00"),
         ]
@@ -473,3 +473,28 @@ def test_dashboard_aceita_intervalo_pela_api(cliente):
     assert body["vendas_por_periodo"] == [{"periodo": hoje, "receita_bruta": "60.00", "total_pedidos": 1}]
     assert body["desempenho_unidades"][0]["nome"] == "Unidade BI"
     assert body["fidelidade"]["pedidos_com_cliente"] == 0
+
+
+@pytest.mark.integration
+def test_dashboard_converte_utc_para_horario_brasilia(db_session):
+    """Garante que pedidos apos 21h em Brasilia (dia seguinte em UTC) contam no dia e hora locais."""
+    unidade, produto_a, _produto_b, variacao_a, _variacao_b = _base_bi(db_session)
+    # 01:30 UTC de 02/04 equivale a 22:30 de 01/04 em America/Sao_Paulo.
+    db_session.add(
+        _pedido_com_itens(
+            unidade,
+            datetime(2026, 4, 2, 1, 30),
+            "80.00",
+            "80.00",
+            [(produto_a, variacao_a, 2, "40.00")],
+        )
+    )
+    db_session.commit()
+
+    dia_local = repository.obter_dashboard(db_session, data_inicio=date(2026, 4, 1), data_fim=date(2026, 4, 1))
+    dia_seguinte = repository.obter_dashboard(db_session, data_inicio=date(2026, 4, 2), data_fim=date(2026, 4, 2))
+
+    assert dia_local.kpis.total_pedidos == 1
+    assert dia_local.kpis.receita_bruta == Decimal("80.00")
+    assert any(item.hora == "22h" and item.quantidade == 2 for item in dia_local.vendas_por_hora)
+    assert dia_seguinte.kpis.total_pedidos == 0

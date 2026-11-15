@@ -21,6 +21,7 @@ class ItemPedidoCreate(BaseModel):
     quantidade: int = Field(..., gt=0)
     observacao: Optional[str] = None
     adicional_ids: list[int] = []
+    combo_produto_ids: list[int] = []
     produto_nome: Optional[str] = None
 
 
@@ -102,6 +103,10 @@ class CancelarPedido(BaseModel):
 
 class AtualizarParaViagemPedido(BaseModel):
     para_viagem: bool
+
+
+class AtualizarObservacaoItemPedido(BaseModel):
+    observacao: Optional[str] = None
 
 
 class FinalizarPedido(BaseModel):

@@ -1,8 +1,9 @@
 from calendar import monthrange
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -22,6 +23,19 @@ from src.pedidos.model import ItemPedido, Pedido, StatusItemPedido, StatusPedido
 
 LIMITE_DIAS_AGRUPAMENTO_DIARIO = 62
 LIMITE_TOP_CLIENTES = 5
+FUSO_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+
+
+def _para_horario_brasilia(momento: datetime) -> datetime:
+    """Converte datetimes gravados em UTC (naive ou aware) para America/Sao_Paulo."""
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=timezone.utc)
+    return momento.astimezone(FUSO_SAO_PAULO)
+
+
+def _agora_brasilia() -> datetime:
+    """Retorna o instante atual no fuso America/Sao_Paulo."""
+    return datetime.now(FUSO_SAO_PAULO)
 
 
 def _money(value: Decimal) -> Decimal:
@@ -74,11 +88,15 @@ def _pedidos_validos(db: Session, unidade_id: int | None) -> list[Pedido]:
 
 
 def _pedidos_do_mes(pedidos: list[Pedido], ano: int, mes: int) -> list[Pedido]:
-    return [pedido for pedido in pedidos if pedido.created_at.year == ano and pedido.created_at.month == mes]
+    return [
+        pedido
+        for pedido in pedidos
+        if (criado_em := _para_horario_brasilia(pedido.created_at)).year == ano and criado_em.month == mes
+    ]
 
 
 def _pedidos_no_intervalo(pedidos: list[Pedido], inicio: date, fim: date) -> list[Pedido]:
-    return [pedido for pedido in pedidos if inicio <= pedido.created_at.date() <= fim]
+    return [pedido for pedido in pedidos if inicio <= _para_horario_brasilia(pedido.created_at).date() <= fim]
 
 
 def _totais_pedidos(pedidos: list[Pedido]) -> tuple[Decimal, Decimal, int, Decimal]:
@@ -175,21 +193,20 @@ def _produtos_vendidos(
     """
     vendas_por_hora = defaultdict(int)
     produtos: dict[tuple[int, str], dict[str, Decimal | int | str]] = {}
-    ano_anterior, mes_anterior = _mes_anterior(agora)
-    comparar_periodos = pedidos_anteriores is not None
+    mes_anterior = None if pedidos_anteriores is not None else _mes_anterior(agora)
 
     for pedido in pedidos:
         receita_pedido = _pedido_total_itens(pedido)
+        criado_em = _para_horario_brasilia(pedido.created_at)
         for item in pedido.itens:
             if item.status == StatusItemPedido.cancelado:
                 continue
 
             receita_item = _item_total(item)
-            vendas_por_hora[pedido.created_at.hour] += item.quantidade
+            vendas_por_hora[criado_em.hour] += item.quantidade
             nome_produto = _nome_produto_com_sabor(item)
-            chave = (item.produto_id, nome_produto)
             produto = produtos.setdefault(
-                chave,
+                (item.produto_id, nome_produto),
                 {
                     "produto_id": item.produto_id,
                     "nome": nome_produto,
@@ -207,13 +224,9 @@ def _produtos_vendidos(
                 receita_item,
                 receita_pedido,
             )
-            if comparar_periodos or (
-                pedido.created_at.year == agora.year and pedido.created_at.month == agora.month
-            ):
+            if mes_anterior is None or (criado_em.year == agora.year and criado_em.month == agora.month):
                 produto["receita_atual"] = Decimal(produto["receita_atual"]) + receita_item
-            if not comparar_periodos and (
-                pedido.created_at.year == ano_anterior and pedido.created_at.month == mes_anterior
-            ):
+            if mes_anterior is not None and (criado_em.year, criado_em.month) == mes_anterior:
                 produto["receita_anterior"] = Decimal(produto["receita_anterior"]) + receita_item
 
     for pedido in pedidos_anteriores or []:
@@ -318,14 +331,15 @@ def _vendas_por_periodo(
     if inicio is None or fim is None:
         if not pedidos:
             return "dia", []
-        inicio, fim = pedidos[0].created_at.date(), pedidos[-1].created_at.date()
+        inicio = _para_horario_brasilia(pedidos[0].created_at).date()
+        fim = _para_horario_brasilia(pedidos[-1].created_at).date()
 
     agrupar_por_dia = (fim - inicio).days <= LIMITE_DIAS_AGRUPAMENTO_DIARIO
     formato = "%Y-%m-%d" if agrupar_por_dia else "%Y-%m"
     receitas: dict[str, Decimal] = defaultdict(Decimal)
     quantidades: dict[str, int] = defaultdict(int)
     for pedido in pedidos:
-        chave = pedido.created_at.strftime(formato)
+        chave = _para_horario_brasilia(pedido.created_at).strftime(formato)
         receitas[chave] += pedido.subtotal
         quantidades[chave] += 1
 
@@ -451,12 +465,12 @@ def _filtrar_periodo(
     ``data_inicio``/``data_fim`` tem prioridade sobre os demais filtros e fazem as
     variacoes compararem com o periodo anterior de mesma duracao.
     """
-    agora = datetime.now()
+    agora = _agora_brasilia()
 
     if data_inicio is not None and data_fim is not None:
         return _PeriodoFiltrado(
             pedidos=_pedidos_no_intervalo(pedidos, data_inicio, data_fim),
-            agora_ref=datetime.combine(data_fim, agora.time()),
+            agora_ref=datetime.combine(data_fim, agora.time(), tzinfo=FUSO_SAO_PAULO),
             pedidos_anteriores=_pedidos_no_intervalo(pedidos, *_intervalo_anterior(data_inicio, data_fim)),
             inicio=data_inicio,
             fim=data_fim,
@@ -474,7 +488,7 @@ def _filtrar_periodo(
         )
     if ano is not None:
         return _PeriodoFiltrado(
-            pedidos=[pedido for pedido in pedidos if pedido.created_at.year == ano],
+            pedidos=[pedido for pedido in pedidos if _para_horario_brasilia(pedido.created_at).year == ano],
             agora_ref=agora.replace(year=ano, day=1),
             inicio=date(ano, 1, 1),
             fim=date(ano, 12, 31),
