@@ -6,6 +6,7 @@ from src.pedidos import repository
 from src.pedidos.schema import (
     AdicionarItensPedido,
     AumentarQuantidadeItemPedido,
+    AtualizarObservacaoItemPedido,
     AtualizarParaViagemPedido,
     AtualizarStatusCozinha,
     CancelarItemPedido,
@@ -90,6 +91,16 @@ def aumentar_quantidade_item(
 ) -> PedidoRead:
     """Aumenta a quantidade de um item ainda nao preparado."""
     return repository.aumentar_quantidade_item(db, item_id, data)
+
+
+@router.patch("/itens/{item_id}", response_model=PedidoRead)
+def atualizar_observacao_item(
+    item_id: int,
+    data: AtualizarObservacaoItemPedido,
+    db: Session = Depends(get_db),
+) -> PedidoRead:
+    """Atualiza a observacao de um item aberto antes do inicio do preparo."""
+    return repository.atualizar_observacao_item(db, item_id, data)
 
 
 @router.post("/{pedido_id}/cancelar", response_model=PedidoRead)
