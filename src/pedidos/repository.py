@@ -59,7 +59,12 @@ def obter_pedido(db: Session, pedido_id: int) -> Pedido:
 
 def _obter_pedido_para_atualizacao(db: Session, pedido_id: int) -> Pedido:
     """Retorna e bloqueia o pedido para atualizacao transacional ou lanca 404."""
-    pedido = db.query(Pedido).filter(Pedido.id == pedido_id).with_for_update().first()
+    pedido = (
+        db.query(Pedido)
+        .filter(Pedido.id == pedido_id)
+        .with_for_update(of=Pedido)
+        .first()
+    )
     if not pedido:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido nao encontrado")
     return pedido

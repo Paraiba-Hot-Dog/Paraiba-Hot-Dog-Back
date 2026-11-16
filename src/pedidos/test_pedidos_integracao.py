@@ -542,3 +542,69 @@ def test_atualizar_observacao_item_aberto(cliente, cardapio_base):
     cliente.patch("/pedidos/cozinha/status", json={"pedido_id": pedido_id, "lote": 1, "status": "preparando"})
     bloqueado = cliente.patch(f"/pedidos/itens/{item_id}", json={"observacao": "Obs: tarde demais"})
     assert bloqueado.status_code == 400
+
+
+@pytest.mark.integration
+def test_atualizar_status_cozinha_trava_apenas_tabela_pedidos_no_postgres(cliente, db_session, cardapio_base):
+    """Garante FOR UPDATE OF pedidos para nao falhar com LEFT OUTER JOIN no PostgreSQL."""
+    from sqlalchemy.dialects import postgresql  # pylint: disable=import-outside-toplevel
+
+    from src.pedidos import repository  # pylint: disable=import-outside-toplevel
+    from src.pedidos.schema import AtualizarStatusCozinha  # pylint: disable=import-outside-toplevel
+    from src.pedidos.model import StatusItemPedido  # pylint: disable=import-outside-toplevel
+
+    criacao = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Teste Postgres Lock",
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 1,
+                    "adicional_ids": [],
+                }
+            ],
+        },
+    )
+    assert criacao.status_code == 201
+    pedido_id = criacao.json()["id"]
+
+    sqls_postgres: list[str] = []
+    query_original = db_session.query
+
+    class QueryEspiada:
+        """Proxy simples para inspecionar o SQL compilado para PostgreSQL em tempo de execucao."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, nome):
+            attr = getattr(self._inner, nome)
+            if not callable(attr):
+                return attr
+
+            def wrapper(*args, **kwargs):
+                res = attr(*args, **kwargs)
+                if hasattr(res, "statement"):
+                    return QueryEspiada(res)
+                return res
+
+            return wrapper
+
+        def first(self):
+            sqls_postgres.append(str(self._inner.statement.compile(dialect=postgresql.dialect())))
+            return self._inner.first()
+
+    db_session.query = lambda *args, **kwargs: QueryEspiada(query_original(*args, **kwargs))
+    try:
+        itens = repository.atualizar_status_cozinha(
+            db_session,
+            AtualizarStatusCozinha(pedido_id=pedido_id, lote=1, status=StatusItemPedido.entregue),
+        )
+    finally:
+        db_session.query = query_original
+
+    assert len(itens) == 1
+    assert itens[0].status == StatusItemPedido.entregue
+    assert any("FOR UPDATE OF pedidos" in sql for sql in sqls_postgres)
