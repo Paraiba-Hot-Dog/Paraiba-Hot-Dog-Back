@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from src.clientes.model import Cliente
 from src.pedidos.model import (
@@ -39,9 +39,14 @@ VALOR_DESCONTO_FIDELIDADE = Decimal("17.00")
 LIMITE_ENTREGUES_COZINHA = 30
 
 
+def _opcoes_carregamento_pedido():
+    """Carrega itens e adicionais do pedido em lote para evitar consultas N+1."""
+    return (selectinload(Pedido.itens).selectinload(ItemPedido.adicionais),)
+
+
 def listar_pedidos(db: Session, filtro: PedidoFiltro) -> list[Pedido]:
     """Lista os pedidos com filtros opcionais de unidade e status, ordenados do mais recente."""
-    query = db.query(Pedido)
+    query = db.query(Pedido).options(*_opcoes_carregamento_pedido())
     if filtro.unidade_id is not None:
         query = query.filter(Pedido.unidade_id == filtro.unidade_id)
     if filtro.status is not None:
@@ -51,7 +56,12 @@ def listar_pedidos(db: Session, filtro: PedidoFiltro) -> list[Pedido]:
 
 def obter_pedido(db: Session, pedido_id: int) -> Pedido:
     """Retorna um pedido pelo ID ou lanca 404 se nao encontrado."""
-    pedido = db.get(Pedido, pedido_id)
+    pedido = (
+        db.query(Pedido)
+        .options(*_opcoes_carregamento_pedido())
+        .filter(Pedido.id == pedido_id)
+        .first()
+    )
     if not pedido:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido nao encontrado")
     return pedido
@@ -61,6 +71,7 @@ def _obter_pedido_para_atualizacao(db: Session, pedido_id: int) -> Pedido:
     """Retorna e bloqueia o pedido para atualizacao transacional ou lanca 404."""
     pedido = (
         db.query(Pedido)
+        .options(*_opcoes_carregamento_pedido())
         .filter(Pedido.id == pedido_id)
         .with_for_update(of=Pedido)
         .first()
@@ -117,7 +128,7 @@ def _validar_pedido_nao_em_preparo(pedido: Pedido) -> None:
         )
 
 
-def _validar_cliente_unidade(db: Session, data: PedidoCreate) -> None:
+def _validar_cliente_unidade(db: Session, data: PedidoCreate) -> Cliente | None:
     """Valida existencia da unidade, do cliente e a disponibilidade de pontos de fidelidade."""
     if not db.get(Unidade, data.unidade_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unidade nao encontrada")
@@ -135,6 +146,7 @@ def _validar_cliente_unidade(db: Session, data: PedidoCreate) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cliente nao possui pontos suficientes para resgate",
             )
+    return cliente
 
 
 def _validar_variacao_disponivel(
@@ -242,6 +254,7 @@ def _criar_item(unidade_id: int, data: ItemPedidoCreate, lote: int, db: Session)
 
     item = ItemPedido(
         produto_variacao_id=variacao.id,
+        produto_variacao=variacao,
         produto_id=variacao.produto_id,
         produto_nome=nome_gravado,
         produto_variacao_nome=_nome_variacao(variacao),
@@ -276,9 +289,49 @@ def _recalcular_totais(pedido: Pedido) -> None:
     pedido.total = max(pedido.subtotal - pedido.desconto_fidelidade, Decimal("0"))
 
 
+def _aplicar_pagamento_e_fidelidade(
+    pedido: Pedido,
+    cliente: Cliente | None,
+    forma_pagamento: FormaPagamento,
+    para_viagem: bool | None = None,
+) -> None:
+    """Valida itens, movimenta pontos de fidelidade e marca o pedido como pago."""
+    if not any(item.status != StatusItemPedido.cancelado for item in pedido.itens):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pedido sem itens para pagamento")
+
+    if pedido.pontos_fidelidade_utilizados:
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Desconto de fidelidade exige cliente cadastrado",
+            )
+        if cliente.pontos_fidelidade < pedido.pontos_fidelidade_utilizados:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cliente nao possui pontos suficientes para resgate",
+            )
+        cliente.pontos_fidelidade -= pedido.pontos_fidelidade_utilizados
+
+    if cliente is not None and not pedido.pontos_fidelidade_creditados:
+        pontos = sum(
+            item.quantidade * item.produto_variacao.produto.pontos_fidelidade_por_unidade
+            for item in pedido.itens
+            if item.status != StatusItemPedido.cancelado
+        )
+        cliente.pontos_fidelidade += pontos
+        pedido.pontos_fidelidade_creditados = True
+
+    if para_viagem is not None:
+        pedido.para_viagem = para_viagem
+
+    pedido.status = StatusPedido.pago
+    pedido.forma_pagamento = forma_pagamento
+    pedido.fechado_em = datetime.utcnow()
+
+
 def criar_pedido(db: Session, data: PedidoCreate) -> Pedido:
-    """Cria um novo pedido com seus itens iniciais, aplicando desconto de fidelidade se solicitado."""
-    _validar_cliente_unidade(db, data)
+    """Cria um novo pedido com itens iniciais, podendo finalizar o pagamento na mesma transacao."""
+    cliente = _validar_cliente_unidade(db, data)
     pedido = Pedido(
         unidade_id=data.unidade_id,
         nome_comanda=data.nome_comanda,
@@ -290,10 +343,12 @@ def criar_pedido(db: Session, data: PedidoCreate) -> Pedido:
     pedido.itens = [_criar_item(pedido.unidade_id, item_data, 1, db) for item_data in data.itens]
     _recalcular_totais(pedido)
 
+    if data.forma_pagamento is not None:
+        _aplicar_pagamento_e_fidelidade(pedido, cliente, data.forma_pagamento)
+
     db.add(pedido)
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def adicionar_itens(db: Session, pedido_id: int, data: AdicionarItensPedido) -> Pedido:
@@ -454,42 +509,11 @@ def finalizar_pedido(db: Session, pedido_id: int, data: FinalizarPedido) -> Pedi
     _validar_pedido_aberto(pedido)
     _recalcular_totais(pedido)
 
-    if not any(item.status != StatusItemPedido.cancelado for item in pedido.itens):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Pedido sem itens para pagamento")
-
     cliente = _obter_cliente_para_atualizacao(db, pedido.cliente_id)
-    if pedido.pontos_fidelidade_utilizados:
-        if not cliente:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Desconto de fidelidade exige cliente cadastrado",
-            )
-        if cliente.pontos_fidelidade < pedido.pontos_fidelidade_utilizados:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cliente nao possui pontos suficientes para resgate",
-            )
-        cliente.pontos_fidelidade -= pedido.pontos_fidelidade_utilizados
-
-    if cliente is not None and not pedido.pontos_fidelidade_creditados:
-        pontos = sum(
-            item.quantidade * item.produto_variacao.produto.pontos_fidelidade_por_unidade
-            for item in pedido.itens
-            if item.status != StatusItemPedido.cancelado
-        )
-        cliente.pontos_fidelidade += pontos
-        pedido.pontos_fidelidade_creditados = True
-
-    if data.para_viagem is not None:
-        pedido.para_viagem = data.para_viagem
-
-    pedido.status = StatusPedido.pago
-    pedido.forma_pagamento = data.forma_pagamento
-    pedido.fechado_em = datetime.utcnow()
+    _aplicar_pagamento_e_fidelidade(pedido, cliente, data.forma_pagamento, data.para_viagem)
 
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def _assinatura_adicionais(item: ItemPedido) -> tuple[int | None, ...]:
@@ -524,6 +548,7 @@ def listar_cozinha(
 
     query = (
         db.query(ItemPedido)
+        .options(selectinload(ItemPedido.adicionais), selectinload(ItemPedido.pedido))
         .join(ItemPedido.pedido)
         .filter(
             Pedido.status != StatusPedido.cancelado,

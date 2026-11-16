@@ -608,3 +608,52 @@ def test_atualizar_status_cozinha_trava_apenas_tabela_pedidos_no_postgres(client
     assert len(itens) == 1
     assert itens[0].status == StatusItemPedido.entregue
     assert any("FOR UPDATE OF pedidos" in sql for sql in sqls_postgres)
+
+
+@pytest.mark.integration
+def test_criar_pedido_ja_finalizado_em_uma_requisicao(cliente, cardapio_base):
+    """Garante criacao e pagamento atomicos em POST /pedidos/ com forma_pagamento e fidelidade."""
+    cardapio_base["cliente"].pontos_fidelidade = 10
+
+    resposta = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Pagamento Direto",
+            "cliente_id": cardapio_base["cliente"].id,
+            "usar_desconto_fidelidade": True,
+            "forma_pagamento": "pix",
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 2,
+                    "adicional_ids": [],
+                }
+            ],
+        },
+    )
+    assert resposta.status_code == 201
+    dados = resposta.json()
+    assert dados["status"] == "pago"
+    assert dados["forma_pagamento"] == "pix"
+    assert dados["fechado_em"] is not None
+    assert dados["subtotal"] == "39.80"
+    assert dados["desconto_fidelidade"] == "17.00"
+    assert dados["total"] == "22.80"
+    assert dados["pontos_fidelidade_utilizados"] == 10
+    assert dados["pontos_fidelidade_creditados"] is True
+
+    resposta_cliente = cliente.get(f"/clientes/{cardapio_base['cliente'].id}")
+    assert resposta_cliente.status_code == 200
+    assert resposta_cliente.json()["pontos_fidelidade"] == 2
+
+    sem_itens = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Sem Itens",
+            "forma_pagamento": "pix",
+            "itens": [],
+        },
+    )
+    assert sem_itens.status_code == 400
