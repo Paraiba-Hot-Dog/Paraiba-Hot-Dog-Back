@@ -52,6 +52,7 @@ class PedidoCreate(BaseModel):
     observacao: Optional[str] = None
     para_viagem: bool = False
     usar_desconto_fidelidade: bool = False
+    forma_pagamento: Optional[FormaPagamento] = None
     itens: list[ItemPedidoCreate] = []
 
 
