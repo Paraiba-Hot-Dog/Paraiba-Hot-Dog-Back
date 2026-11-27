@@ -1,9 +1,11 @@
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, noload, selectinload
 
 from src.clientes.model import Cliente
 from src.pedidos.model import (
@@ -37,11 +39,33 @@ VALOR_DESCONTO_FIDELIDADE = Decimal("17.00")
 # Quantos lotes entregues a aba "Entregues" da cozinha mostra. O historico completo
 # continua no banco; o limite existe so para a tela nao crescer sem fim.
 LIMITE_ENTREGUES_COZINHA = 30
+FUSO_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
-def _opcoes_carregamento_pedido():
-    """Carrega itens e adicionais do pedido em lote para evitar consultas N+1."""
-    return (selectinload(Pedido.itens).selectinload(ItemPedido.adicionais),)
+def _opcoes_carregamento_pedido(carregar_variacao: bool = False):
+    """Carrega itens e adicionais sem arrastar unidade, cliente ou o catalogo completo."""
+    if carregar_variacao:
+        itens_loader = selectinload(Pedido.itens).options(
+            selectinload(ItemPedido.produto_variacao)
+            .selectinload(ProdutoVariacao.produto)
+            .options(
+                noload(Produto.subcategoria),
+                noload(Produto.unidades),
+                noload(Produto.grupos),
+                noload(Produto.variacoes),
+            ),
+            selectinload(ItemPedido.adicionais).noload(ItemPedidoAdicional.adicional),
+        )
+    else:
+        itens_loader = selectinload(Pedido.itens).options(
+            noload(ItemPedido.produto_variacao),
+            selectinload(ItemPedido.adicionais).noload(ItemPedidoAdicional.adicional),
+        )
+    return (
+        noload(Pedido.unidade),
+        noload(Pedido.cliente),
+        itens_loader,
+    )
 
 
 def listar_pedidos(db: Session, filtro: PedidoFiltro) -> list[Pedido]:
@@ -51,6 +75,19 @@ def listar_pedidos(db: Session, filtro: PedidoFiltro) -> list[Pedido]:
         query = query.filter(Pedido.unidade_id == filtro.unidade_id)
     if filtro.status is not None:
         query = query.filter(Pedido.status == filtro.status)
+    if filtro.apenas_hoje_ou_abertos:
+        inicio_hoje_utc = (
+            datetime.now(FUSO_SAO_PAULO)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(timezone.utc)
+            .replace(tzinfo=None)
+        )
+        query = query.filter(
+            or_(
+                Pedido.status == StatusPedido.aberto,
+                Pedido.created_at >= inicio_hoje_utc,
+            )
+        )
     return query.order_by(Pedido.created_at.desc()).offset(filtro.skip).limit(filtro.limit).all()
 
 
@@ -67,11 +104,15 @@ def obter_pedido(db: Session, pedido_id: int) -> Pedido:
     return pedido
 
 
-def _obter_pedido_para_atualizacao(db: Session, pedido_id: int) -> Pedido:
+def _obter_pedido_para_atualizacao(
+    db: Session,
+    pedido_id: int,
+    carregar_variacao: bool = False,
+) -> Pedido:
     """Retorna e bloqueia o pedido para atualizacao transacional ou lanca 404."""
     pedido = (
         db.query(Pedido)
-        .options(*_opcoes_carregamento_pedido())
+        .options(*_opcoes_carregamento_pedido(carregar_variacao=carregar_variacao))
         .filter(Pedido.id == pedido_id)
         .with_for_update(of=Pedido)
         .first()
@@ -366,8 +407,7 @@ def adicionar_itens(db: Session, pedido_id: int, data: AdicionarItensPedido) -> 
     _recalcular_totais(pedido)
 
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def atualizar_para_viagem(db: Session, pedido_id: int, data: AtualizarParaViagemPedido) -> Pedido:
@@ -376,8 +416,7 @@ def atualizar_para_viagem(db: Session, pedido_id: int, data: AtualizarParaViagem
     _validar_pedido_nao_cancelado(pedido)
     pedido.para_viagem = data.para_viagem
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def _copiar_adicionais(item: ItemPedido) -> list[ItemPedidoAdicional]:
@@ -403,8 +442,7 @@ def aumentar_quantidade_item(db: Session, item_id: int, data: AumentarQuantidade
     item.quantidade += data.quantidade
     _recalcular_totais(pedido)
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def atualizar_observacao_item(db: Session, item_id: int, data: AtualizarObservacaoItemPedido) -> Pedido:
@@ -417,8 +455,7 @@ def atualizar_observacao_item(db: Session, item_id: int, data: AtualizarObservac
 
     item.observacao = data.observacao.strip() or None if data.observacao is not None else None
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def cancelar_item(db: Session, item_id: int, data: CancelarItemPedido) -> Pedido:
@@ -465,13 +502,12 @@ def cancelar_item(db: Session, item_id: int, data: CancelarItemPedido) -> Pedido
     if not any(item_pedido.status != StatusItemPedido.cancelado for item_pedido in pedido.itens):
         pedido.status = StatusPedido.cancelado
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def cancelar_pedido(db: Session, pedido_id: int, data: CancelarPedido) -> Pedido:
     """Cancela um pedido nao cancelado, estornando fidelidade e pagamento quando necessario."""
-    pedido = _obter_pedido_para_atualizacao(db, pedido_id)
+    pedido = _obter_pedido_para_atualizacao(db, pedido_id, carregar_variacao=True)
     _validar_pedido_nao_cancelado(pedido)
 
     cliente = _obter_cliente_para_atualizacao(db, pedido.cliente_id)
@@ -499,13 +535,12 @@ def cancelar_pedido(db: Session, pedido_id: int, data: CancelarPedido) -> Pedido
 
     _recalcular_totais(pedido)
     db.commit()
-    db.refresh(pedido)
-    return pedido
+    return obter_pedido(db, pedido.id)
 
 
 def finalizar_pedido(db: Session, pedido_id: int, data: FinalizarPedido) -> Pedido:
     """Fecha o pedido com a forma de pagamento informada, deduz e credita pontos de fidelidade."""
-    pedido = _obter_pedido_para_atualizacao(db, pedido_id)
+    pedido = _obter_pedido_para_atualizacao(db, pedido_id, carregar_variacao=True)
     _validar_pedido_aberto(pedido)
     _recalcular_totais(pedido)
 
@@ -548,7 +583,14 @@ def listar_cozinha(
 
     query = (
         db.query(ItemPedido)
-        .options(selectinload(ItemPedido.adicionais), selectinload(ItemPedido.pedido))
+        .options(
+            noload(ItemPedido.produto_variacao),
+            selectinload(ItemPedido.adicionais).noload(ItemPedidoAdicional.adicional),
+            selectinload(ItemPedido.pedido).options(
+                noload(Pedido.unidade),
+                noload(Pedido.cliente),
+            ),
+        )
         .join(ItemPedido.pedido)
         .filter(
             Pedido.status != StatusPedido.cancelado,
@@ -640,4 +682,6 @@ def atualizar_status_cozinha(db: Session, data: AtualizarStatusCozinha) -> list[
         item.status = data.status
 
     db.commit()
-    return itens
+    pedido_atualizado = obter_pedido(db, pedido.id)
+    ids_retornados = {item.id for item in itens}
+    return [item for item in pedido_atualizado.itens if item.id in ids_retornados]

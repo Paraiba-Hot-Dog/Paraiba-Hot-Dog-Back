@@ -80,6 +80,7 @@ class PedidoRead(BaseModel):
 class PedidoFiltro(BaseModel):
     unidade_id: Optional[int] = Field(None, gt=0)
     status: Optional[StatusPedido] = None
+    apenas_hoje_ou_abertos: bool = False
     skip: int = Field(default=0, ge=0)
     limit: int = Field(default=100, gt=0, le=100)
 

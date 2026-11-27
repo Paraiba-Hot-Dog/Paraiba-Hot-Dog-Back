@@ -657,3 +657,100 @@ def test_criar_pedido_ja_finalizado_em_uma_requisicao(cliente, cardapio_base):
         },
     )
     assert sem_itens.status_code == 400
+
+
+@pytest.mark.integration
+def test_listar_pedidos_apenas_hoje_ou_abertos(cliente, db_session, cardapio_base):
+    """Garante que apenas_hoje_ou_abertos mantem abertos antigos e oculta pagos antigos."""
+    from datetime import datetime, timedelta  # pylint: disable=import-outside-toplevel
+
+    from src.pedidos.model import Pedido, StatusPedido  # pylint: disable=import-outside-toplevel
+
+    antigo = datetime.utcnow() - timedelta(days=3)
+    unidade_id = cardapio_base["unidade"].id
+
+    aberto_antigo = Pedido(
+        unidade_id=unidade_id,
+        nome_comanda="Aberto Antigo",
+        status=StatusPedido.aberto,
+        created_at=antigo,
+    )
+    pago_antigo = Pedido(
+        unidade_id=unidade_id,
+        nome_comanda="Pago Antigo",
+        status=StatusPedido.pago,
+        created_at=antigo,
+    )
+    db_session.add_all([aberto_antigo, pago_antigo])
+    db_session.commit()
+
+    pago_hoje = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": unidade_id,
+            "nome_comanda": "Pago Hoje",
+            "forma_pagamento": "pix",
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 1,
+                    "adicional_ids": [],
+                }
+            ],
+        },
+    )
+    assert pago_hoje.status_code == 201
+
+    filtrados = cliente.get(
+        "/pedidos/",
+        params={"unidade_id": unidade_id, "apenas_hoje_ou_abertos": True},
+    )
+    assert filtrados.status_code == 200
+    nomes = {pedido["nome_comanda"] for pedido in filtrados.json()}
+    assert "Aberto Antigo" in nomes
+    assert "Pago Hoje" in nomes
+    assert "Pago Antigo" not in nomes
+
+
+@pytest.mark.integration
+def test_listagens_nao_disparam_cascata_de_catalogo(cliente, db_session, cardapio_base):
+    """Garante que listar pedidos e fila da cozinha nao consultam catalogo ou unidades."""
+    from sqlalchemy import event  # pylint: disable=import-outside-toplevel
+
+    resposta = cliente.post(
+        "/pedidos/",
+        json={
+            "unidade_id": cardapio_base["unidade"].id,
+            "nome_comanda": "Sem Cascata",
+            "cliente_id": cardapio_base["cliente"].id,
+            "itens": [
+                {
+                    "produto_variacao_id": cardapio_base["variacao"].id,
+                    "quantidade": 1,
+                    "adicional_ids": [cardapio_base["adicionais"][0].id],
+                }
+            ],
+        },
+    )
+    assert resposta.status_code == 201
+    unidade_id = cardapio_base["unidade"].id
+    db_session.expire_all()
+
+    sqls: list[str] = []
+
+    def capturar(_conn, _cursor, statement, _parameters, _context, _executemany):
+        sqls.append(statement.lower())
+
+    event.listen(test_engine, "before_cursor_execute", capturar)
+    try:
+        res_pedidos = cliente.get("/pedidos/", params={"unidade_id": unidade_id})
+        res_cozinha = cliente.get("/pedidos/cozinha", params={"unidade_id": unidade_id})
+    finally:
+        event.remove(test_engine, "before_cursor_execute", capturar)
+
+    assert res_pedidos.status_code == 200
+    assert res_cozinha.status_code == 200
+    tabelas_proibidas = ("produtos", "grupos_opcoes", "opcoes_complemento", "unidades", "enderecos", "clientes")
+    for sql in sqls:
+        for tabela in tabelas_proibidas:
+            assert tabela not in sql, f"Consulta inesperada na tabela {tabela}: {sql}"

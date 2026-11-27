@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -327,17 +327,21 @@ def test_analises_sem_resultados(cliente):
 
 def test_analises_cenario_de_homologacao(cliente, db_session, unidade, produto):
     tipos = TipoEventoAnalytics
+    agora_evento = ingestao.horario_truncado_utc(datetime.now(UTC))
     batata = _criar_produto(db_session, "Batata", produto.subcategoria)
     for canal in (CanalAquisicao.instagram, CanalAquisicao.qrcode):
-        _criar_eventos(db_session, tipos.visita_site, 20, canal=canal)
-        _criar_eventos(db_session, tipos.abertura_cardapio, 20, canal=canal)
-        _criar_eventos(db_session, tipos.selecao_unidade, 20, canal=canal, unidade_id=unidade.id)
+        _criar_eventos(db_session, tipos.visita_site, 20, canal=canal, ocorrido_em=agora_evento)
+        _criar_eventos(db_session, tipos.abertura_cardapio, 20, canal=canal, ocorrido_em=agora_evento)
+        _criar_eventos(
+            db_session, tipos.selecao_unidade, 20, canal=canal, unidade_id=unidade.id, ocorrido_em=agora_evento,
+        )
         for item, primeiro in ((produto, True), (batata, False)):
             _criar_eventos(
                 db_session, tipos.visualizacao_produto, 20,
                 primeiro_na_visita=primeiro, canal=canal, unidade_id=unidade.id, produto_id=item.id,
+                ocorrido_em=agora_evento,
             )
-        _criar_eventos(db_session, tipos.clique_pedir, 20, canal=canal, unidade_id=unidade.id)
+        _criar_eventos(db_session, tipos.clique_pedir, 20, canal=canal, unidade_id=unidade.id, ocorrido_em=agora_evento)
 
     corpo = cliente.get("/analytics/aquisicao/analises").json()
     origem = {linha["canal"]: linha for linha in corpo["origem"]}
