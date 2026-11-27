@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import String, and_, case, cast, exists, false, func, literal, or_, select, union_all
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, noload, selectinload
 from sqlalchemy.sql.functions import count
 
 from src.clientes.model import Cliente
@@ -19,7 +19,7 @@ from src.ifood.client import IfoodError, client
 from src.ifood.model import IfoodCommand, IfoodEvent, IfoodHealth, IfoodOrder
 from src.ifood.service import (command_dict, enqueue, guard_merchant, open_dispute, order_dict, pickup_code,
                                utc)
-from src.pedidos.model import ItemPedido, Pedido
+from src.pedidos.model import ItemPedido, ItemPedidoAdicional, Pedido
 from src.pedidos.schema import PedidoRead
 from src.security import get_current_user
 from src.usuarios.model import Usuario
@@ -124,20 +124,36 @@ def centralized_query(filters, unit):
     return query, rows
 
 
+def _local_order_options():
+    return (
+        noload(Pedido.unidade),
+        selectinload(Pedido.itens).options(
+            noload(ItemPedido.produto_variacao),
+            selectinload(ItemPedido.adicionais).noload(ItemPedidoAdicional.adicional),
+        ),
+    )
+
+
 @router.get("/pedidos/centralizados")
 def centralized(filters: CentralFilters = Depends(), actor=Depends(operator), db: Session = Depends(get_db)):
     unit = unit_scope(actor, filters.unidade_id)
     query, rows = centralized_query(filters, unit)
     total = db.scalar(select(count()).select_from(query.subquery()))
-    page = db.execute(query.order_by(rows.c.created_at.desc(), rows.c.origem, rows.c.id.desc())
-                      .offset(filters.skip).limit(filters.limit)).mappings()
+    rows_page = list(
+        db.execute(query.order_by(rows.c.created_at.desc(), rows.c.origem, rows.c.id.desc())
+                   .offset(filters.skip).limit(filters.limit)).mappings()
+    )
+    local_ids = [row["id"] for row in rows_page if row["origem"] != "ifood"]
+    local_orders = {}
+    if local_ids:
+        orders = db.query(Pedido).options(*_local_order_options()).filter(Pedido.id.in_(local_ids)).all()
+        local_orders = {order.id: order for order in orders}
     result = []
-    for row in page:
+    for row in rows_page:
         if row["origem"] == "ifood":
             result.append(order_dict(db, db.get(IfoodOrder, row["id"]), detail=filters.cozinha))
         else:
-            order = db.get(Pedido, row["id"])
-            result.append(local_order_dict(order))
+            result.append(local_order_dict(local_orders[row["id"]]))
     health = db.get(IfoodHealth, 1)
     abandoned = select(count()).where(
         IfoodEvent.processed.is_(True), IfoodEvent.error.is_not(None),
@@ -166,7 +182,7 @@ def local_order_dict(order):
 
 @router.get("/pedidos/centralizados/proprio/{order_id}")
 def local_detail(order_id: int, actor=Depends(operator), db: Session = Depends(get_db)):
-    order = db.get(Pedido, order_id)
+    order = db.query(Pedido).options(*_local_order_options()).filter(Pedido.id == order_id).first()
     if not order:
         raise HTTPException(404, "Pedido não encontrado")
     unit_scope(actor, order.unidade_id)
